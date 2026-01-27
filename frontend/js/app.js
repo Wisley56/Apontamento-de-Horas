@@ -282,10 +282,7 @@ async function generateDaysList() {
         isWeekend: isWeekend(dateStr),
         isHoliday: state.holidays[dateAPI] ? true : false,
         holidayName: state.holidays[dateAPI] || null,
-        entry1: "",
-        exit1: "",
-        entry2: "",
-        exit2: "",
+        intervals: [{ entry: "", exit: "" }, { entry: "", exit: "" }], // 2 intervalos por padrão
         totalHours: 0,
         status: "pending", // pending, ok, divergent
       };
@@ -330,7 +327,7 @@ function renderDaysList() {
             : getExceptionType(day.dateDisplay);
 
         return `
-                <div class="day-row ${rowClass}" data-index="${index}">
+                <div class="day-row non-workday ${rowClass}" data-index="${index}">
                     <span class="day-date">${day.dateDisplay}</span>
                     <span class="day-name">${day.dayName}</span>
                     <span class="day-type-badge">📅 ${reason}</span>
@@ -338,56 +335,92 @@ function renderDaysList() {
             `;
       }
 
+      // Renderizar inputs de intervalos numerados
+      const intervalsHtml = day.intervals.map((interval, intervalIndex) => `
+        <input type="time" class="time-input" value="${interval.entry}" 
+               onchange="updateIntervalTime(${index}, ${intervalIndex}, 'entry', this.value)" 
+               placeholder="08:00" title="Entrada ${intervalIndex + 1}">
+        <input type="time" class="time-input" value="${interval.exit}" 
+               onchange="updateIntervalTime(${index}, ${intervalIndex}, 'exit', this.value)" 
+               placeholder="12:00" title="Saída ${intervalIndex + 1}">
+      `).join('');
+
+      // Renderizar botões de adicionar/remover intervalo
+      const actionsHtml = `
+        <div class="day-actions">
+          <button type="button" class="btn-add-interval" onclick="addInterval(${index})" title="Adicionar intervalo">
+            ➕
+          </button>
+          ${day.intervals.length > 2 ? `
+            <button type="button" class="btn-remove-interval" onclick="removeLastInterval(${index})" title="Remover último intervalo">
+              ➖
+            </button>
+          ` : ''}
+        </div>
+      `;
+
       return `
-            <div class="day-row" data-index="${index}">
+            <div class="day-row workday" data-index="${index}" data-intervals="${day.intervals.length}">
                 <span class="day-date">${day.dateDisplay}</span>
                 <span class="day-name">${day.dayName}</span>
-                <input type="time" class="time-input" data-field="entry1" value="${day.entry1}" 
-                       onchange="updateDayTime(${index}, 'entry1', this.value)" placeholder="08:00">
-                <input type="time" class="time-input" data-field="exit1" value="${day.exit1}" 
-                       onchange="updateDayTime(${index}, 'exit1', this.value)" placeholder="12:00">
-                <input type="time" class="time-input" data-field="entry2" value="${day.entry2}" 
-                       onchange="updateDayTime(${index}, 'entry2', this.value)" placeholder="13:00">
-                <input type="time" class="time-input" data-field="exit2" value="${day.exit2}" 
-                       onchange="updateDayTime(${index}, 'exit2', this.value)" placeholder="17:00">
+                ${intervalsHtml}
                 <span class="day-total" id="total-${index}">${formatTotalHours(day.totalHours)}</span>
+                ${actionsHtml}
             </div>
         `;
     })
     .join("");
 }
 
-function updateDayTime(index, field, value) {
-  state.days[index][field] = value;
-  calculateDayTotal(index);
+// Atualizar tempo de um intervalo específico
+function updateIntervalTime(dayIndex, intervalIndex, field, value) {
+  state.days[dayIndex].intervals[intervalIndex][field] = value;
+  calculateDayTotal(dayIndex);
 }
 
-function calculateDayTotal(index) {
-  const day = state.days[index];
+// Adicionar novo intervalo a um dia
+function addInterval(dayIndex) {
+  state.days[dayIndex].intervals.push({ entry: "", exit: "" });
+  renderDaysList();
+}
+
+// Remover intervalo de um dia
+function removeInterval(dayIndex, intervalIndex) {
+  if (state.days[dayIndex].intervals.length > 1) {
+    state.days[dayIndex].intervals.splice(intervalIndex, 1);
+    calculateDayTotal(dayIndex);
+    renderDaysList();
+  }
+}
+
+// Remover último intervalo de um dia (mantém mínimo de 2)
+function removeLastInterval(dayIndex) {
+  if (state.days[dayIndex].intervals.length > 2) {
+    state.days[dayIndex].intervals.pop();
+    calculateDayTotal(dayIndex);
+    renderDaysList();
+  }
+}
+
+function calculateDayTotal(dayIndex) {
+  const day = state.days[dayIndex];
   let totalMinutes = 0;
 
-  // Calcular período 1 (manhã)
-  if (day.entry1 && day.exit1) {
-    const start1 = timeToMinutes(day.entry1);
-    const end1 = timeToMinutes(day.exit1);
-    if (end1 > start1) {
-      totalMinutes += end1 - start1;
-    }
-  }
-
-  // Calcular período 2 (tarde)
-  if (day.entry2 && day.exit2) {
-    const start2 = timeToMinutes(day.entry2);
-    const end2 = timeToMinutes(day.exit2);
-    if (end2 > start2) {
-      totalMinutes += end2 - start2;
+  // Calcular todos os intervalos
+  for (const interval of day.intervals) {
+    if (interval.entry && interval.exit) {
+      const start = timeToMinutes(interval.entry);
+      const end = timeToMinutes(interval.exit);
+      if (end > start) {
+        totalMinutes += end - start;
+      }
     }
   }
 
   day.totalHours = totalMinutes / 60;
 
   // Atualizar display
-  const totalElement = document.getElementById(`total-${index}`);
+  const totalElement = document.getElementById(`total-${dayIndex}`);
   if (totalElement) {
     totalElement.textContent = formatTotalHours(day.totalHours);
   }
@@ -417,7 +450,10 @@ function hoursToRedmine(hours) {
 }
 
 // Expor funções para uso global
-window.updateDayTime = updateDayTime;
+window.updateIntervalTime = updateIntervalTime;
+window.addInterval = addInterval;
+window.removeInterval = removeInterval;
+window.removeLastInterval = removeLastInterval;
 
 // ============ Exceções ============
 

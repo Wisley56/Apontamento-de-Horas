@@ -393,7 +393,7 @@ select {
 
 .days-header {
   display: grid;
-  grid-template-columns: 100px 70px repeat(4, 95px) 70px;
+  grid-template-columns: 100px 70px repeat(4, 90px) 70px 60px;
   gap: var(--spacing-sm);
   padding: var(--spacing-sm) var(--spacing-md);
   background: var(--bg-card);
@@ -409,13 +409,39 @@ select {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
-  max-height: 400px;
+  max-height: 500px;
   overflow-y: auto;
 }
 
-.day-row {
+/* Linha de dia útil com 2 intervalos (padrão) */
+.day-row.workday {
   display: grid;
-  grid-template-columns: 100px 70px repeat(4, 95px) 70px;
+  grid-template-columns: 100px 70px repeat(4, 90px) 70px 60px;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  align-items: center;
+  transition: background var(--transition-fast);
+}
+
+/* Linhas com mais intervalos - ajuste automático */
+.day-row.workday[data-intervals="3"] {
+  grid-template-columns: 100px 70px repeat(6, 90px) 70px 60px;
+}
+
+.day-row.workday[data-intervals="4"] {
+  grid-template-columns: 100px 70px repeat(8, 90px) 70px 60px;
+}
+
+.day-row.workday[data-intervals="5"] {
+  grid-template-columns: 100px 70px repeat(10, 90px) 70px 60px;
+}
+
+/* Linha de dia não útil (fim de semana, feriado) */
+.day-row.non-workday {
+  display: grid;
+  grid-template-columns: 100px 70px 1fr;
   gap: var(--spacing-sm);
   padding: var(--spacing-sm) var(--spacing-md);
   background: var(--bg-card);
@@ -453,7 +479,7 @@ select {
   font-size: 0.85rem;
   font-family: inherit;
   width: 100%;
-  min-width: 90px;
+  min-width: 80px;
 }
 
 .day-row input[type="time"]:focus {
@@ -472,6 +498,45 @@ select {
   text-align: center;
 }
 
+/* Ações do dia */
+.day-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--spacing-xs);
+}
+
+.btn-add-interval {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--accent-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: white;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all var(--transition-fast);
+}
+
+.btn-add-interval:hover {
+  background: var(--accent-primary-light);
+  transform: scale(1.1);
+}
+
+.btn-remove-interval {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: transparent;
+  border: 1px solid var(--status-divergent);
+  border-radius: var(--radius-sm);
+  color: var(--status-divergent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all var(--transition-fast);
+  line-height: 1;
+}
+
+.btn-remove-interval:hover {
+  background: var(--status-divergent-bg);
+}
+
 .day-row .day-type-badge {
   font-size: 0.75rem;
   padding: var(--spacing-xs) var(--spacing-sm);
@@ -479,7 +544,6 @@ select {
   color: var(--status-ignored);
   border-radius: var(--radius-full);
   text-align: center;
-  grid-column: 3 / -1;
 }
 
 /* Status Selector */
