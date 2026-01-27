@@ -27,3 +27,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Config com credenciais
+frontend/js/config.js
