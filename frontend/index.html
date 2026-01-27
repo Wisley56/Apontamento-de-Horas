@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Sistema de Apontamento de Horas - Controle suas horas trabalhadas de forma simples e visual">
+    <title>Apontamento de Horas</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <span class="logo-icon">⏱️</span>
+                    <h1>Apontamento de Horas</h1>
+                </div>
+                <p class="tagline">Controle suas horas trabalhadas de forma simples</p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Form Section -->
+            <section class="form-section glass-card">
+                <h2>📅 Configuração do Período</h2>
+                
+                <!-- Selection Type Toggle -->
+                <div class="toggle-container">
+                    <button class="toggle-btn active" data-type="period" id="btn-period">
+                        📆 Período
+                    </button>
+                    <button class="toggle-btn" data-type="single" id="btn-single">
+                        📍 Dia Específico
+                    </button>
+                </div>
+
+                <form id="hours-form">
+                    <!-- Date Selection -->
+                    <div class="date-inputs">
+                        <div class="form-group" id="start-date-group">
+                            <label for="start-date">Data Inicial</label>
+                            <input type="date" id="start-date" required>
+                        </div>
+                        <div class="form-group" id="end-date-group">
+                            <label for="end-date">Data Final</label>
+                            <input type="date" id="end-date" required>
+                        </div>
+                        <div class="form-group" id="single-date-group" style="display: none;">
+                            <label for="single-date">Data</label>
+                            <input type="date" id="single-date">
+                        </div>
+                    </div>
+
+                    <!-- State Selection -->
+                    <div class="form-group">
+                        <label for="state-select">Estado (UF)</label>
+                        <select id="state-select" required>
+                            <option value="">Selecione o estado...</option>
+                        </select>
+                    </div>
+
+                    <!-- Generate Days Button -->
+                    <button type="button" class="btn-secondary btn-generate" id="generate-days-btn">
+                        <span>📋</span> Gerar Lista de Dias
+                    </button>
+
+                    <!-- Hours Input Section - Dynamic Days List -->
+                    <div class="days-list-section" id="days-list-section" style="display: none;">
+                        <h3>⏰ Registro de Horas por Dia</h3>
+                        <p class="section-hint">Informe os horários de entrada e saída para cada dia (manhã e tarde)</p>
+                        
+                        <div class="days-header">
+                            <span class="col-date">Data</span>
+                            <span class="col-day">Dia</span>
+                            <span class="col-time">Entrada 1</span>
+                            <span class="col-time">Saída 1</span>
+                            <span class="col-time">Entrada 2</span>
+                            <span class="col-time">Saída 2</span>
+                            <span class="col-total">Total</span>
+                        </div>
+                        
+                        <div class="days-list" id="days-list">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Manual Exceptions -->
+                    <div class="exceptions-section" id="exceptions-section" style="display: none;">
+                        <h3>📋 Exceções Manuais (opcional)</h3>
+                        <p class="section-hint">Adicione dias de férias, atestado, banco de horas, etc.</p>
+                        
+                        <div class="exception-input-row">
+                            <input type="date" id="exception-date" placeholder="Data">
+                            <select id="exception-type">
+                                <option value="ferias">Férias</option>
+                                <option value="atestado">Atestado</option>
+                                <option value="afastamento">Afastamento</option>
+                                <option value="banco">Banco de Horas</option>
+                                <option value="feriado_manual">Feriado Manual</option>
+                            </select>
+                            <button type="button" id="add-exception" class="btn-secondary">+ Adicionar</button>
+                        </div>
+                        
+                        <ul id="exceptions-list" class="exceptions-list"></ul>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <button type="submit" class="btn-primary" id="analyze-btn" style="display: none;">
+                        <span class="btn-icon">🔍</span>
+                        Analisar Horas
+                    </button>
+                </form>
+            </section>
+
+            <!-- Results Section -->
+            <section class="results-section glass-card" id="results-section" style="display: none;">
+                <div class="results-header">
+                    <h2>📊 Resultado da Análise</h2>
+                    <button class="btn-export" id="export-btn">
+                        <span>📥</span> Exportar Excel
+                    </button>
+                </div>
+
+                <!-- Summary Cards -->
+                <div class="summary-cards" id="summary-cards">
+                    <!-- Populated by JS -->
+                </div>
+
+                <!-- Results Table -->
+                <div class="table-container">
+                    <table class="results-table" id="results-table">
+                        <thead>
+                            <tr>
+                                <th>Data</th>
+                                <th>Dia</th>
+                                <th>Tempo Trabalhado</th>
+                                <th>Valor Redmine</th>
+                                <th>Tipo</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Sistema de Apontamento de Horas &copy; 2026</p>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading" style="display: none;">
+        <div class="spinner"></div>
+        <p>Processando...</p>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
