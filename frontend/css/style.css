@@ -278,6 +278,34 @@ textarea {
   transition: all var(--transition-fast);
 }
 
+/* Estilização do ícone de calendário para melhor contraste */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8) brightness(1.5);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  filter: invert(1) brightness(2);
+  background: rgba(99, 102, 241, 0.3);
+}
+
+/* Estilização do ícone de relógio para inputs de hora - melhor contraste */
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8) brightness(1.5);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator:hover {
+  filter: invert(1) brightness(2);
+  background: rgba(99, 102, 241, 0.3);
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -560,6 +588,7 @@ select {
   cursor: pointer;
   font-size: 0.9rem;
   transition: all var(--transition-fast);
+  color: var(--text-secondary);
 }
 
 .status-selector button:hover {
