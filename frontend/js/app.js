@@ -32,6 +32,7 @@ const elements = {
   // Form
   form: document.getElementById("hours-form"),
   stateSelect: document.getElementById("state-select"),
+  stateSelectGroup: document.getElementById("state-select-group"),
   generateDaysBtn: document.getElementById("generate-days-btn"),
 
   // Days list
@@ -114,8 +115,8 @@ async function loadStates() {
       elements.stateSelect.appendChild(option);
     });
 
-    // Selecionar SP por padrão
-    elements.stateSelect.value = "SP";
+    // Selecionar GO por padrão
+    elements.stateSelect.value = "GO";
   } catch (error) {
     console.error("Erro ao carregar estados:", error);
     showToast("Erro ao carregar estados", "error");
@@ -139,6 +140,17 @@ function setupEventListeners() {
   // Exceções
   elements.addExceptionBtn.addEventListener("click", addException);
 
+  // Auto-gerar dias quando selecionar data (modo dia específico)
+  elements.singleDate.addEventListener("change", handleSingleDateChange);
+
+  // Suporte a Enter para gerar dia rapidamente
+  elements.singleDate.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSingleDateChange();
+    }
+  });
+
   // Submit do formulário
   elements.form.addEventListener("submit", handleSubmit);
 
@@ -155,21 +167,217 @@ function toggleSelectionType(type) {
   elements.btnPeriod.classList.toggle("active", type === "period");
   elements.btnSingle.classList.toggle("active", type === "single");
 
-  // Toggle date inputs
+  // Toggle date inputs e seletor de estado
   if (type === "period") {
     elements.startDateGroup.style.display = "block";
     elements.endDateGroup.style.display = "block";
     elements.singleDateGroup.style.display = "none";
+    // Mostrar seletor de estado para período
+    if (elements.stateSelectGroup) {
+      elements.stateSelectGroup.style.display = "block";
+    }
+    elements.generateDaysBtn.style.display = "flex";
   } else {
     elements.startDateGroup.style.display = "none";
     elements.endDateGroup.style.display = "none";
     elements.singleDateGroup.style.display = "block";
+    // Ocultar seletor de estado para dia específico (desnecessário)
+    if (elements.stateSelectGroup) {
+      elements.stateSelectGroup.style.display = "none";
+    }
+    // Ocultar botão gerar dias (será automático)
+    elements.generateDaysBtn.style.display = "none";
+    
+    // Auto-gerar o dia atual ao clicar em Dia Específico
+    // Delay pequeno para garantir que o campo de data está visível
+    setTimeout(() => {
+      if (elements.singleDate.value) {
+        handleSingleDateChange();
+      }
+    }, 100);
   }
 
   // Esconder lista de dias ao mudar tipo
   elements.daysListSection.style.display = "none";
   elements.exceptionsSection.style.display = "none";
   elements.analyzeBtn.style.display = "none";
+}
+
+// ============ Auto-gerar Dia Específico ============
+
+async function handleSingleDateChange() {
+  const dateValue = elements.singleDate.value;
+  if (!dateValue) return;
+
+  // Usar estado GO por padrão para dia específico
+  const stateUF = "GO";
+  const year = new Date(dateValue).getFullYear();
+
+  showLoading(true);
+
+  try {
+    // Buscar feriados para verificar se é feriado nacional
+    const response = await apiCall(`/api/holidays/${year}/${stateUF}`);
+    const data = await response.json();
+    const holidaysData = data.holidays || {};
+
+    const dateAPI = formatDateForAPI(dateValue);
+    const isHoliday = holidaysData[dateAPI] ? true : false;
+    const holidayName = holidaysData[dateAPI] || null;
+
+    // Verificar se é final de semana
+    const isWeekendDay = isWeekend(dateValue);
+
+    // Se for feriado nacional, mostrar modal de confirmação
+    if (isHoliday) {
+      showLoading(false);
+      const confirmed = await showHolidayConfirmModal(dateAPI, holidayName);
+      if (!confirmed) {
+        // Usuário cancelou, limpar a data
+        showToast("Lançamento cancelado", "info");
+        return;
+      }
+      showLoading(true);
+    }
+
+    // Se for final de semana, também confirmar
+    if (isWeekendDay) {
+      showLoading(false);
+      const dayName = getDayOfWeekName(dateValue);
+      const confirmed = await showWeekendConfirmModal(dateAPI, dayName);
+      if (!confirmed) {
+        showToast("Lançamento cancelado", "info");
+        return;
+      }
+      showLoading(true);
+    }
+
+    // Gerar o dia
+    const dayInfo = {
+      date: dateValue,
+      dateDisplay: dateAPI,
+      dayName: getDayOfWeekName(dateValue),
+      isWeekend: isWeekendDay,
+      isHoliday: isHoliday,
+      holidayName: holidayName,
+      intervals: [{ entry: "", exit: "" }, { entry: "", exit: "" }],
+      totalHours: 0,
+      status: "pending",
+    };
+
+    state.days = [dayInfo];
+    state.holidays = holidaysData;
+    renderDaysList();
+
+    // Mostrar seções
+    elements.daysListSection.style.display = "block";
+    elements.exceptionsSection.style.display = "block";
+    elements.analyzeBtn.style.display = "flex";
+
+    showToast("Dia gerado com sucesso!", "success");
+  } catch (error) {
+    console.error("Erro:", error);
+    showToast("Erro ao gerar dia", "error");
+  } finally {
+    showLoading(false);
+  }
+}
+
+// Modal de confirmação para feriados
+function showHolidayConfirmModal(dateStr, holidayName) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("holiday-confirm-modal");
+    const titleEl = document.getElementById("holiday-modal-title");
+    const messageEl = document.getElementById("holiday-modal-message");
+    const confirmBtn = document.getElementById("holiday-modal-confirm");
+    const cancelBtn = document.getElementById("holiday-modal-cancel");
+
+    if (!modal) {
+      // Fallback para confirm nativo se modal não existir
+      const confirmed = confirm(
+        `A data ${dateStr} é feriado (${holidayName}).\n\nDeseja realmente lançar horas neste dia?`
+      );
+      resolve(confirmed);
+      return;
+    }
+
+    titleEl.textContent = "🎉 Feriado Detectado";
+    messageEl.innerHTML = `
+      <p>A data <strong>${dateStr}</strong> é um feriado:</p>
+      <p class="holiday-name">📅 ${holidayName}</p>
+      <p>Deseja realmente lançar horas neste dia?</p>
+    `;
+
+    modal.style.display = "flex";
+
+    const handleConfirm = () => {
+      modal.style.display = "none";
+      cleanup();
+      resolve(true);
+    };
+
+    const handleCancel = () => {
+      modal.style.display = "none";
+      cleanup();
+      resolve(false);
+    };
+
+    const cleanup = () => {
+      confirmBtn.removeEventListener("click", handleConfirm);
+      cancelBtn.removeEventListener("click", handleCancel);
+    };
+
+    confirmBtn.addEventListener("click", handleConfirm);
+    cancelBtn.addEventListener("click", handleCancel);
+  });
+}
+
+// Modal de confirmação para finais de semana
+function showWeekendConfirmModal(dateStr, dayName) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("holiday-confirm-modal");
+    const titleEl = document.getElementById("holiday-modal-title");
+    const messageEl = document.getElementById("holiday-modal-message");
+    const confirmBtn = document.getElementById("holiday-modal-confirm");
+    const cancelBtn = document.getElementById("holiday-modal-cancel");
+
+    if (!modal) {
+      // Fallback para confirm nativo se modal não existir
+      const confirmed = confirm(
+        `A data ${dateStr} é ${dayName} (final de semana).\n\nDeseja realmente lançar horas neste dia?`
+      );
+      resolve(confirmed);
+      return;
+    }
+
+    titleEl.textContent = "🗓️ Final de Semana";
+    messageEl.innerHTML = `
+      <p>A data <strong>${dateStr}</strong> é <strong>${dayName}</strong> (final de semana).</p>
+      <p>Deseja realmente lançar horas neste dia?</p>
+    `;
+
+    modal.style.display = "flex";
+
+    const handleConfirm = () => {
+      modal.style.display = "none";
+      cleanup();
+      resolve(true);
+    };
+
+    const handleCancel = () => {
+      modal.style.display = "none";
+      cleanup();
+      resolve(false);
+    };
+
+    const cleanup = () => {
+      confirmBtn.removeEventListener("click", handleConfirm);
+      cancelBtn.removeEventListener("click", handleCancel);
+    };
+
+    confirmBtn.addEventListener("click", handleConfirm);
+    cancelBtn.addEventListener("click", handleCancel);
+  });
 }
 
 // ============ Helpers ============

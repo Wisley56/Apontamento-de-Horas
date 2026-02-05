@@ -74,7 +74,7 @@
             </div>
 
             <!-- State Selection -->
-            <div class="form-group">
+            <div class="form-group" id="state-select-group">
               <label for="state-select">Estado (UF)</label>
               <select id="state-select" required>
                 <option value="">Selecione o estado...</option>
@@ -202,6 +202,24 @@
       <footer class="footer">
         <p>Sistema de Apontamento de Horas &copy; 2026</p>
       </footer>
+    </div>
+
+    <!-- Holiday Confirmation Modal -->
+    <div class="modal-overlay" id="holiday-confirm-modal" style="display: none">
+      <div class="modal-card">
+        <h3 id="holiday-modal-title">🎉 Feriado Detectado</h3>
+        <div id="holiday-modal-message" class="modal-message">
+          <!-- Populated by JS -->
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-cancel" id="holiday-modal-cancel">
+            Cancelar
+          </button>
+          <button type="button" class="btn-modal-confirm" id="holiday-modal-confirm">
+            Continuar mesmo assim
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Loading Overlay -->

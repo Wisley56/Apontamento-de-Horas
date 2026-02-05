@@ -87,14 +87,7 @@ class ExportRequest(BaseModel):
 
 
 # ============ ENDPOINTS ============
-
-@app.get("/")
-async def root():
-    """Serve a página principal"""
-    frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
-    if os.path.exists(frontend_path):
-        return FileResponse(frontend_path)
-    return {"message": "Sistema de Apontamento de Horas API"}
+# NOTA: A raiz "/" é servida automaticamente pelo StaticFiles(html=True) no final do arquivo
 
 
 @app.get("/api/states")
@@ -306,12 +299,15 @@ async def export_to_excel(request: ExportRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Servir arquivos estáticos do frontend
+# Servir arquivos estáticos do frontend na raiz
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_dir):
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
