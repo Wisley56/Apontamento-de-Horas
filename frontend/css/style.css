@@ -1184,61 +1184,205 @@ tr.status-ignored {
 
 /* ============ Responsive ============ */
 
-@media (max-width: 768px) {
+/* ============ Responsive ============ */
+
+/* Tablet e Mobile */
+@media (max-width: 1024px) {
   .app-container {
     padding: var(--spacing-md);
   }
-
-  .logo h1 {
-    font-size: 1.8rem;
-  }
-
+  
   .glass-card {
     padding: var(--spacing-lg);
   }
+}
 
-  .toggle-container {
-    width: 100%;
+@media (max-width: 800px) {
+  /* Tipografia e Espaçamento */
+  html {
+     font-size: 14px;
   }
 
-  .toggle-btn {
-    flex: 1;
-    text-align: center;
+  .logo h1 {
+    font-size: 1.5rem;
   }
 
+  /* Form */
   .date-inputs {
     grid-template-columns: 1fr;
+    gap: var(--spacing-md);
   }
-
+  
   .exception-input-row {
     grid-template-columns: 1fr;
   }
 
+  /* Toggle */
+  .toggle-container {
+    width: 100%;
+    margin-bottom: var(--spacing-md);
+  }
+
+  .toggle-btn {
+    flex: 1;
+    justify-content: center;
+    padding: var(--spacing-sm);
+  }
+
+  /* Header da seção de dias */
+  .days-section-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--spacing-md);
+  }
+
+  .btn-paste-hours {
+    justify-content: center;
+    width: 100%;
+  }
+
+  /* --- Transformação da Lista de Dias em Cards --- */
+  .days-header {
+    display: none; /* Esconde cabeçalho da tabela */
+  }
+
+  .days-list {
+    gap: var(--spacing-md);
+    max-height: none; /* Remove scroll interno para usar scroll da página */
+    overflow-y: visible;
+  }
+
+  .day-row.workday,
+  .day-row.non-workday {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--spacing-sm);
+    height: auto;
+    padding: var(--spacing-md);
+    border-left: 4px solid transparent; /* Indicador visual lateral */
+  }
+
+  /* Indicador Visual nos Cards */
+  .day-row.workday {
+    border-left-color: var(--accent-primary);
+  }
+  
+  .day-row.weekend {
+    border-left-color: var(--status-ignored);
+  }
+
+  .day-row.holiday {
+    border-left-color: var(--status-manual);
+  }
+
+  /* Cabeçalho do Card (Data e Dia) */
+  .day-row .day-date {
+    font-size: 1.1rem;
+    display: block;
+  }
+  
+  .day-row .day-name {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-bottom: var(--spacing-xs);
+    display: block;
+  }
+
+  /* Grid de Inputs de Hora dentro do Card */
+  .day-row.workday {
+    /* Resetando grid desktop */
+    grid-template-columns: auto; 
+  }
+
+  /* Reorganizar inputs em grid 2x2 para entry/exit */
+  .day-row.workday input[type="time"] {
+    width: 100%;
+    min-width: 0;
+    text-align: center;
+    padding: var(--spacing-sm);
+    font-size: 1rem; /* Melhor para touch */
+  }
+
+  /* Layout inteligente para intervalos */
+  /* Wrapper virtual criado pelo browser para os elementos soltos não existe, 
+     então usamos nth-child para simular agrupamento se necessário, 
+     mas flex-wrap no container pai com inputs com width calc(50% - gap) é melhor */
+  
+  .day-row.workday {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  /* Forçar quebra de linha para cabeçalho */
+  .day-row .day-date,
+  .day-row .day-name {
+    width: 100%;
+  }
+
+  /* Inputs de hora ocupam 48% cada (2 por linha) */
+  .day-row input[type="time"] {
+    width: 48%;
+    margin-bottom: var(--spacing-xs);
+  }
+
+  /* Total e Ações no rodapé do card */
+  .day-row .day-total {
+    width: 100%;
+    text-align: right;
+    font-size: 1.2rem;
+    margin-top: var(--spacing-sm);
+    padding-top: var(--spacing-sm);
+    border-top: 1px solid var(--border-color);
+  }
+
+  .day-actions {
+    width: 100%;
+    justify-content: flex-end;
+    margin-top: var(--spacing-xs);
+  }
+
+  .btn-add-interval,
+  .btn-remove-interval {
+    padding: var(--spacing-sm) var(--spacing-lg); /* Área de toque maior */
+    font-size: 1.2rem;
+  }
+
+  /* --- Resultados --- */
   .results-header {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
+    gap: var(--spacing-md);
+  }
+
+  .btn-export {
+    justify-content: center;
   }
 
   .summary-cards {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: 1fr; /* Stack cards */
   }
 
-  .results-table {
-    font-size: 0.85rem;
+  .table-container {
+    border: 1px solid var(--border-color);
   }
 
   .results-table th,
   .results-table td {
     padding: var(--spacing-sm);
+    white-space: nowrap; /* Força scroll horizontal na tabela */
+    font-size: 0.85rem;
   }
 }
 
-@media (max-width: 480px) {
-  .summary-cards {
-    grid-template-columns: 1fr;
+/* Telas muito pequenas */
+@media (max-width: 380px) {
+  .logo h1 {
+    font-size: 1.2rem;
   }
-
-  .summary-card .value {
-    font-size: 1.5rem;
+  
+  .day-row input[type="time"] {
+    width: 100%; /* 1 por linha em telas minúsculas */
   }
 }
