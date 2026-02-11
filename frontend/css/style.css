@@ -416,10 +416,94 @@ select {
 
 .days-list-section h3 {
   font-size: 1.1rem;
-  margin-bottom: var(--spacing-xs);
+  margin-bottom: 0;
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
+}
+
+/* Header da seção com botão de colar */
+.days-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing-xs);
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+/* Botão Colar Horários */
+.btn-paste-hours {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn-paste-hours:hover {
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35);
+}
+
+.btn-paste-hours:active {
+  transform: translateY(0);
+}
+
+/* Kbd tag para atalho de teclado */
+.section-hint kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+}
+
+/* Animação de highlight quando horários são colados */
+@keyframes pasteHighlight {
+  0% {
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.6);
+    border-color: #8b5cf6;
+  }
+  50% {
+    box-shadow: 0 0 8px 2px rgba(139, 92, 246, 0.3);
+    border-color: #8b5cf6;
+  }
+  100% {
+    box-shadow: none;
+    border-color: var(--border-color);
+  }
+}
+
+.paste-filled {
+  animation: pasteHighlight 1.5s ease forwards;
+}
+
+/* Highlight na linha do dia quando preenchido via paste */
+@keyframes pasteRowHighlight {
+  0% {
+    background: rgba(139, 92, 246, 0.2);
+  }
+  100% {
+    background: var(--bg-card);
+  }
+}
+
+.paste-row-highlight {
+  animation: pasteRowHighlight 1.5s ease forwards;
 }
 
 .btn-generate {
