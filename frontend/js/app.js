@@ -40,6 +40,7 @@ const elements = {
   daysList: document.getElementById("days-list"),
   exceptionsSection: document.getElementById("exceptions-section"),
   analyzeBtn: document.getElementById("analyze-btn"),
+  pasteHoursBtn: document.getElementById("paste-hours-btn"),
 
   // Exceptions
   exceptionDate: document.getElementById("exception-date"),
@@ -156,6 +157,14 @@ function setupEventListeners() {
 
   // Exportar
   elements.exportBtn.addEventListener("click", handleExport);
+
+  // Colar horários — via Ctrl+V em qualquer lugar da página
+  document.addEventListener("paste", handlePasteEvent);
+
+  // Botão de colar horários
+  if (elements.pasteHoursBtn) {
+    elements.pasteHoursBtn.addEventListener("click", handlePasteButtonClick);
+  }
 }
 
 // ============ Toggle Selection Type ============
@@ -662,6 +671,212 @@ window.updateIntervalTime = updateIntervalTime;
 window.addInterval = addInterval;
 window.removeInterval = removeInterval;
 window.removeLastInterval = removeLastInterval;
+
+// ============ Colar Horários (Paste) ============
+
+/**
+ * Parser de texto colado do sistema da empresa.
+ * Formato esperado:
+ *   dd/mm/yyyy dia.
+ *   Entrada
+ *   HH:MM
+ *   Saída
+ *   HH:MM
+ *   ...
+ * Retorna array de { date: "dd/mm/yyyy", intervals: [{entry, exit}] }
+ */
+function parsePastedTimesheet(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})\s/;
+  const timeRegex = /^\d{2}:\d{2}$/;
+  const result = [];
+  let currentDay = null;
+  let expectingTime = null; // 'entry' ou 'exit'
+  let currentEntry = null;
+
+  for (const line of lines) {
+    // Verificar se é uma linha de data
+    const dateMatch = line.match(dateRegex);
+    if (dateMatch) {
+      // Salvar dia anterior se existir
+      if (currentDay && currentDay.intervals.length > 0) {
+        result.push(currentDay);
+      }
+      currentDay = { date: dateMatch[1], intervals: [] };
+      currentEntry = null;
+      expectingTime = null;
+      continue;
+    }
+
+    if (!currentDay) continue;
+
+    // Verificar se é "Entrada" ou "Saída"
+    const lowerLine = line.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (lowerLine === 'entrada') {
+      expectingTime = 'entry';
+      continue;
+    }
+    if (lowerLine === 'saida') {
+      expectingTime = 'exit';
+      continue;
+    }
+
+    // Verificar se é um horário
+    if (timeRegex.test(line) && expectingTime) {
+      if (expectingTime === 'entry') {
+        currentEntry = { entry: line, exit: '' };
+      } else if (expectingTime === 'exit' && currentEntry) {
+        currentEntry.exit = line;
+        currentDay.intervals.push({ ...currentEntry });
+        currentEntry = null;
+      }
+      expectingTime = null;
+    }
+  }
+
+  // Não esquecer o último dia
+  if (currentDay && currentDay.intervals.length > 0) {
+    result.push(currentDay);
+  }
+
+  return result;
+}
+
+/**
+ * Aplica os dados parseados nos dias já gerados em state.days.
+ * Apenas preenche dias que existem — não altera dias que não foram colados.
+ * Lançamentos manuais permanecem intactos para dias não encontrados no paste.
+ */
+function applyPastedData(parsedDays) {
+  let filledCount = 0;
+  const filledIndices = [];
+
+  for (const parsed of parsedDays) {
+    // Encontrar o dia correspondente no state.days pelo dateDisplay (dd/mm/yyyy)
+    const dayIndex = state.days.findIndex(d => d.dateDisplay === parsed.date);
+    if (dayIndex === -1) continue;
+
+    const day = state.days[dayIndex];
+
+    // Pular dias não úteis
+    if (day.isWeekend || day.isHoliday || isException(day.dateDisplay)) continue;
+
+    // Ajustar número de intervalos para corresponder ao colado
+    while (day.intervals.length < parsed.intervals.length) {
+      day.intervals.push({ entry: '', exit: '' });
+    }
+
+    // Preencher intervalos
+    for (let i = 0; i < parsed.intervals.length; i++) {
+      day.intervals[i].entry = parsed.intervals[i].entry;
+      day.intervals[i].exit = parsed.intervals[i].exit;
+    }
+
+    // Recalcular total
+    calculateDayTotal(dayIndex);
+    filledCount++;
+    filledIndices.push(dayIndex);
+  }
+
+  if (filledCount > 0) {
+    renderDaysList();
+    highlightPastedRows(filledIndices);
+    showToast(`✅ ${filledCount} dia(s) preenchido(s) com sucesso!`, 'success');
+  } else {
+    showToast('⚠️ Nenhum dia correspondente encontrado. Verifique se os dias foram gerados e se as datas coincidem.', 'error');
+  }
+
+  return filledCount;
+}
+
+/**
+ * Aplica feedback visual (highlight) nas linhas e inputs preenchidos.
+ */
+function highlightPastedRows(indices) {
+  setTimeout(() => {
+    for (const idx of indices) {
+      const row = document.querySelector(`.day-row[data-index="${idx}"]`);
+      if (row) {
+        row.classList.add('paste-row-highlight');
+        // Animar inputs individuais
+        const inputs = row.querySelectorAll('input[type="time"]');
+        inputs.forEach(input => {
+          if (input.value) {
+            input.classList.add('paste-filled');
+          }
+        });
+
+        // Remover classes após animação
+        setTimeout(() => {
+          row.classList.remove('paste-row-highlight');
+          inputs.forEach(input => input.classList.remove('paste-filled'));
+        }, 1600);
+      }
+    }
+  }, 50); // Pequeno delay para DOM se atualizar
+}
+
+/**
+ * Event handler para Ctrl+V (paste) global.
+ * Só age se houver dias gerados e a seção estiver visível.
+ * Não interfere com paste em campos de input/textarea.
+ */
+function handlePasteEvent(e) {
+  // Não interceptar paste dentro de inputs, textareas ou selects
+  const activeTag = document.activeElement?.tagName?.toLowerCase();
+  if (['input', 'textarea', 'select'].includes(activeTag)) return;
+
+  // Só processar se houver dias gerados e seção visível
+  if (state.days.length === 0 || elements.daysListSection.style.display === 'none') return;
+
+  const text = e.clipboardData?.getData('text/plain');
+  if (!text) return;
+
+  // Verificar se o texto parece ser um timesheet (tem ao menos uma data e "Entrada")
+  const hasDate = /\d{2}\/\d{2}\/\d{4}/.test(text);
+  const hasEntry = /entrada/i.test(text);
+  if (!hasDate || !hasEntry) return;
+
+  e.preventDefault();
+  const parsed = parsePastedTimesheet(text);
+
+  if (parsed.length === 0) {
+    showToast('⚠️ Não foi possível reconhecer horários no texto colado.', 'error');
+    return;
+  }
+
+  applyPastedData(parsed);
+}
+
+/**
+ * Handler do botão "Colar Horários" — usa clipboard API.
+ */
+async function handlePasteButtonClick() {
+  // Verificar se há dias gerados
+  if (state.days.length === 0) {
+    showToast('Gere a lista de dias primeiro antes de colar horários.', 'error');
+    return;
+  }
+
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) {
+      showToast('Área de transferência vazia. Copie os horários primeiro.', 'error');
+      return;
+    }
+
+    const parsed = parsePastedTimesheet(text);
+    if (parsed.length === 0) {
+      showToast('⚠️ Não foi possível reconhecer horários no texto colado.', 'error');
+      return;
+    }
+
+    applyPastedData(parsed);
+  } catch (error) {
+    console.error('Erro ao acessar clipboard:', error);
+    showToast('Não foi possível acessar a área de transferência. Use Ctrl+V em vez do botão.', 'error');
+  }
+}
 
 // ============ Exceções ============
 
