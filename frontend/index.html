@@ -38,21 +38,34 @@
         <section class="form-section glass-card">
           <h2>📅 Configuração do Período</h2>
 
-          <!-- Selection Type Toggle -->
-          <div class="toggle-container">
-            <button
-              class="toggle-btn active"
-              data-type="period"
-              id="btn-period"
-            >
-              📆 Período
-            </button>
-            <button class="toggle-btn" data-type="single" id="btn-single">
-              📍 Dia Específico
-            </button>
-          </div>
-
           <form id="hours-form">
+
+            <!-- Identificação do Colaborador -->
+            <div class="form-group colaborador-group" id="colaborador-group">
+              <label for="colaborador-name">👤 Seu Nome</label>
+              <input
+                type="text"
+                id="colaborador-name"
+                placeholder="Digite seu nome completo..."
+                autocomplete="name"
+                required
+              />
+            </div>
+
+            <!-- Selection Type Toggle -->
+            <div class="toggle-container">
+              <button
+                class="toggle-btn active"
+                data-type="period"
+                id="btn-period"
+              >
+                📆 Período
+              </button>
+              <button class="toggle-btn" data-type="single" id="btn-single">
+                📍 Dia Específico
+              </button>
+            </div>
+
             <!-- Date Selection -->
             <div class="date-inputs">
               <div class="form-group" id="start-date-group">
@@ -104,10 +117,11 @@
               </div>
               <p class="section-hint">
                 Informe os horários manualmente ou cole com
-                <kbd>Ctrl+V</kbd> os horários copiados do sistema da empresa
+                <kbd>Ctrl+V</kbd> os horários copiados do sistema da empresa.
+                Adicione uma <strong>descrição</strong> em cada intervalo para registrar as atividades.
               </p>
 
-              <div class="days-header">
+              <div class="days-header" id="days-header">
                 <span class="col-date">Data</span>
                 <span class="col-day">Dia</span>
                 <span class="col-time">Entrada 1</span>
@@ -182,6 +196,20 @@
             <!-- Populated by JS -->
           </div>
 
+          <!-- Save Confirmation -->
+          <div class="save-confirmation" id="save-confirmation">
+            <div class="save-confirmation-content">
+              <span class="save-confirmation-icon">💾</span>
+              <div class="save-confirmation-text">
+                <strong>Deseja salvar este lançamento no histórico?</strong>
+                <span>O registro ficará disponível para consulta futura.</span>
+              </div>
+              <button type="button" class="btn-save-history" id="save-history-btn">
+                Salvar Histórico
+              </button>
+            </div>
+          </div>
+
           <!-- Results Table -->
           <div class="table-container">
             <table class="results-table" id="results-table">
@@ -199,6 +227,43 @@
                 <!-- Populated by JS -->
               </tbody>
             </table>
+          </div>
+        </section>
+
+        <!-- History Section -->
+        <section class="history-section glass-card" id="history-section" style="display: none">
+          <div class="history-header">
+            <h2>📁 Histórico de Lançamentos</h2>
+            <button type="button" class="btn-refresh-history" id="refresh-history-btn" title="Atualizar lista">
+              🔄
+            </button>
+          </div>
+
+          <!-- History Filters -->
+          <div class="history-filters">
+            <div class="history-filter-group">
+              <label for="filter-colaborador">👤 Colaborador</label>
+              <input
+                type="text"
+                id="filter-colaborador"
+                placeholder="Filtrar por nome..."
+              />
+            </div>
+            <div class="history-filter-group">
+              <label for="filter-mes">📅 Mês</label>
+              <input type="month" id="filter-mes" />
+            </div>
+            <button type="button" class="btn-secondary btn-filter-history" id="filter-history-btn">
+              🔍 Filtrar
+            </button>
+            <button type="button" class="btn-clear-filter" id="clear-filter-btn">
+              ✕ Limpar
+            </button>
+          </div>
+
+          <!-- History List -->
+          <div id="history-list" class="history-list">
+            <!-- Populated by JS -->
           </div>
         </section>
       </main>
@@ -223,6 +288,66 @@
           <button type="button" class="btn-modal-confirm" id="holiday-modal-confirm">
             Continuar mesmo assim
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Save History Confirmation Modal -->
+    <div class="modal-overlay" id="save-confirm-modal" style="display: none">
+      <div class="modal-card">
+        <h3>💾 Salvar no Histórico</h3>
+        <div class="modal-message">
+          <p>Confirma o salvamento deste apontamento no histórico?</p>
+          <p id="save-modal-info" class="save-modal-info"></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-cancel" id="save-modal-cancel">
+            Cancelar
+          </button>
+          <button type="button" class="btn-modal-confirm" id="save-modal-confirm">
+            ✔ Salvar
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- History Detail Modal -->
+    <div class="modal-overlay" id="history-detail-modal" style="display: none">
+      <div class="modal-card history-detail-card">
+        <div class="history-detail-header">
+          <div class="history-detail-title">
+            <h3>📋 Detalhes do Apontamento</h3>
+            <div id="history-detail-meta" class="history-detail-meta"></div>
+          </div>
+          <button type="button" class="btn-close-detail" id="close-detail-btn" title="Fechar">✕</button>
+        </div>
+        <div id="history-detail-body" class="history-detail-body">
+          <!-- Populated by JS -->
+        </div>
+        <div class="modal-actions" style="margin-top: 1.5rem;">
+          <button type="button" class="btn-modal-cancel" id="close-detail-btn-2">Fechar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Botão Flutuante - Ver Histórico -->
+    <button type="button" class="btn-float-history" id="float-history-btn" style="display: none" title="Ver Histórico de Lançamentos">
+      <span>📁</span>
+      <span class="float-history-label">Histórico</span>
+    </button>
+
+    <!-- Duplicate Warning Modal -->
+    <div class="modal-overlay" id="duplicate-modal" style="display: none">
+      <div class="modal-card">
+        <h3>⚠️ Registro Duplicado</h3>
+        <div class="modal-message">
+          <p>Já existe um apontamento salvo para <strong id="dup-colaborador-name"></strong> neste período:</p>
+          <div id="dup-records-list" class="dup-records-list"></div>
+          <p class="dup-question">Deseja salvar mesmo assim (irá criar um novo registro paralelo)?</p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-modal-cancel" id="dup-modal-cancel">Cancelar</button>
+          <button type="button" class="btn-modal-confirm btn-dup-confirm" id="dup-modal-confirm">Salvar assim mesmo</button>
         </div>
       </div>
     </div>
