@@ -30,3 +30,6 @@ Thumbs.db
 
 # Config com credenciais
 frontend/js/config.js
+
+# Database
+*.db

@@ -1,9 +1,9 @@
 """
 API Backend - Sistema de Apontamento de Horas
-FastAPI server com endpoints para análise e exportação.
+FastAPI server com endpoints para análise, exportação e persistência de histórico.
 """
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -12,6 +12,9 @@ from typing import List, Dict, Optional
 from datetime import datetime, date
 import os
 import io
+import sqlite3
+import json
+from pathlib import Path
 
 from services.hours_service import process_day, time_to_decimal
 from services.holidays_service import (
@@ -28,7 +31,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 app = FastAPI(
     title="Sistema de Apontamento de Horas",
     description="API para controle e análise de apontamento de horas trabalhadas",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS para permitir requisições do frontend
@@ -39,6 +42,43 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============ BANCO DE DADOS ============
+
+# O arquivo .db fica na mesma pasta do backend
+DB_PATH = Path(__file__).parent / "apontamentos.db"
+
+
+def get_db():
+    """Retorna uma conexão com o banco SQLite."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    """Inicializa o banco de dados criando a tabela se não existir."""
+    conn = get_db()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS apontamentos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                colaborador TEXT NOT NULL,
+                periodo_inicio TEXT NOT NULL,
+                periodo_fim TEXT NOT NULL,
+                total_horas REAL DEFAULT 0,
+                criado_em TEXT NOT NULL,
+                dados_json TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
 
 
 # ============ MODELOS ============
@@ -84,6 +124,29 @@ class AnalyzeResponse(BaseModel):
 
 class ExportRequest(BaseModel):
     days: List[Dict]
+
+
+class IntervalDetail(BaseModel):
+    entry: str = ""
+    exit: str = ""
+    description: str = ""
+
+
+class DayDetail(BaseModel):
+    date: str           # dd/mm/yyyy
+    day_name: str
+    intervals: List[IntervalDetail]
+    total_hours: float = 0.0
+    is_ignored: bool = False
+    ignore_reason: str = ""
+
+
+class SaveRequest(BaseModel):
+    colaborador: str
+    periodo_inicio: str   # dd/mm/yyyy
+    periodo_fim: str      # dd/mm/yyyy
+    total_horas: float = 0.0
+    dias: List[DayDetail]
 
 
 # ============ ENDPOINTS ============
@@ -297,6 +360,228 @@ async def export_to_excel(request: ExportRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ ENDPOINTS DE HISTÓRICO ============
+
+@app.get("/api/verificar-duplicata")
+async def verificar_duplicata(
+    colaborador: str = Query(..., description="Nome do colaborador"),
+    periodo_inicio: str = Query(..., description="Data início dd/mm/yyyy"),
+    periodo_fim: str = Query(..., description="Data fim dd/mm/yyyy"),
+):
+    """
+    Verifica se já existe um apontamento para o mesmo colaborador que sobreponha
+    o período informado. Retorna os registros conflitantes caso existam.
+    """
+    try:
+        conn = get_db()
+        try:
+            # Busca registros do mesmo colaborador (case-insensitive)
+            rows = conn.execute(
+                """
+                SELECT id, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em
+                FROM apontamentos
+                WHERE LOWER(colaborador) = LOWER(?)
+                ORDER BY id DESC
+                """,
+                (colaborador.strip(),)
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return {"duplicata": False, "registros": []}
+
+        # Converter datas para comparação
+        def parse_date(d):
+            try:
+                return datetime.strptime(d, "%d/%m/%Y").date()
+            except Exception:
+                return None
+
+        novo_inicio = parse_date(periodo_inicio)
+        novo_fim = parse_date(periodo_fim)
+
+        if not novo_inicio or not novo_fim:
+            return {"duplicata": False, "registros": []}
+
+        conflitos = []
+        for row in rows:
+            ex_inicio = parse_date(row["periodo_inicio"])
+            ex_fim = parse_date(row["periodo_fim"])
+            if not ex_inicio or not ex_fim:
+                continue
+            # Sobreposição: não há sobreposição apenas se um termina antes do outro começar
+            if not (novo_fim < ex_inicio or novo_inicio > ex_fim):
+                conflitos.append({
+                    "id": row["id"],
+                    "colaborador": row["colaborador"],
+                    "periodo_inicio": row["periodo_inicio"],
+                    "periodo_fim": row["periodo_fim"],
+                    "total_horas": row["total_horas"],
+                    "criado_em": row["criado_em"],
+                })
+
+        return {
+            "duplicata": len(conflitos) > 0,
+            "registros": conflitos,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao verificar duplicata: {str(e)}")
+
+
+@app.post("/api/salvar-apontamento", status_code=201)
+async def salvar_apontamento(request: SaveRequest):
+    """
+    Salva um apontamento no banco de dados SQLite.
+    Recebe: colaborador, periodo_inicio, periodo_fim, total_horas, dias (com intervalos e descrições).
+    """
+    try:
+        criado_em = datetime.now().strftime("%d/%m/%Y %H:%M")
+        dados_json = json.dumps(
+            [d.model_dump() for d in request.dias],
+            ensure_ascii=False
+        )
+
+        conn = get_db()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.colaborador.strip(),
+                    request.periodo_inicio,
+                    request.periodo_fim,
+                    request.total_horas,
+                    criado_em,
+                    dados_json,
+                )
+            )
+            conn.commit()
+            record_id = cursor.lastrowid
+        finally:
+            conn.close()
+
+        return {
+            "id": record_id,
+            "mensagem": "Apontamento salvo com sucesso!",
+            "colaborador": request.colaborador,
+            "criado_em": criado_em,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar apontamento: {str(e)}")
+
+
+@app.get("/api/historico")
+async def get_historico(
+    colaborador: Optional[str] = Query(None, description="Filtrar por nome do colaborador"),
+    mes: Optional[str] = Query(None, description="Filtrar por mês no formato YYYY-MM")
+):
+    """
+    Retorna o histórico de apontamentos.
+    Parâmetros opcionais: colaborador (texto), mes (YYYY-MM).
+    """
+    try:
+        conn = get_db()
+        try:
+            query = "SELECT id, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em FROM apontamentos WHERE 1=1"
+            params = []
+
+            if colaborador and colaborador.strip():
+                query += " AND LOWER(colaborador) LIKE LOWER(?)"
+                params.append(f"%{colaborador.strip()}%")
+
+            if mes and mes.strip():
+                # mes no formato YYYY-MM → converter para dd/mm/yyyy parcial
+                try:
+                    year, month = mes.strip().split("-")
+                    query += " AND (periodo_inicio LIKE ? OR periodo_fim LIKE ?)"
+                    params.append(f"_/{month}/{year}")
+                    params.append(f"_/{month}/{year}")
+                except ValueError:
+                    pass  # ignorar filtro de mês inválido
+
+            query += " ORDER BY id DESC LIMIT 100"
+            rows = conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+
+        result = [
+            {
+                "id": row["id"],
+                "colaborador": row["colaborador"],
+                "periodo_inicio": row["periodo_inicio"],
+                "periodo_fim": row["periodo_fim"],
+                "total_horas": row["total_horas"],
+                "criado_em": row["criado_em"],
+            }
+            for row in rows
+        ]
+        return {"registros": result}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar histórico: {str(e)}")
+
+
+@app.get("/api/historico/{record_id}")
+async def get_historico_detail(record_id: int):
+    """Retorna detalhe completo de um apontamento (incluindo dias e intervalos)."""
+    try:
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM apontamentos WHERE id = ?", (record_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Registro não encontrado")
+
+        return {
+            "id": row["id"],
+            "colaborador": row["colaborador"],
+            "periodo_inicio": row["periodo_inicio"],
+            "periodo_fim": row["periodo_fim"],
+            "total_horas": row["total_horas"],
+            "criado_em": row["criado_em"],
+            "dias": json.loads(row["dados_json"]),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar registro: {str(e)}")
+
+
+@app.delete("/api/historico/{record_id}")
+async def delete_historico(record_id: int):
+    """Remove um apontamento do histórico pelo ID."""
+    try:
+        conn = get_db()
+        try:
+            result = conn.execute(
+                "DELETE FROM apontamentos WHERE id = ?", (record_id,)
+            )
+            conn.commit()
+            deleted = result.rowcount
+        finally:
+            conn.close()
+
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="Registro não encontrado")
+
+        return {"mensagem": "Registro excluído com sucesso", "id": record_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir registro: {str(e)}")
 
 
 # Servir arquivos estáticos do frontend na raiz
