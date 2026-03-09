@@ -105,8 +105,9 @@ async function apiCall(endpoint, method = "GET", data = null) {
   }
   const response = await fetch(`${API_BASE}${endpoint}`, options);
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: "Erro na requisição" }));
-    throw new Error(error.detail || "Erro na requisição");
+    const errorBody = await response.json().catch(() => null);
+    const detail = errorBody?.detail || errorBody?.message || `Erro HTTP ${response.status}`;
+    throw new Error(detail);
   }
   return response;
 }
@@ -387,9 +388,25 @@ function showSaveConfirmModal() {
 }
 
 async function checkDuplicateAndSave() {
-  const colaborador = state.colaborador || elements.colaboradorName.value.trim();
+  // Garantir que o colaborador está sempre atualizado a partir do campo de input
+  const colaborador = elements.colaboradorName.value.trim() || state.colaborador;
+
+  if (!colaborador) {
+    showToast("Informe seu nome antes de salvar", "error");
+    elements.colaboradorName.focus();
+    return;
+  }
+
+  // Sincronizar state com o valor atual do input
+  state.colaborador = colaborador;
+
   const periodoInicio = state.days[0]?.dateDisplay || "";
   const periodoFim = state.days[state.days.length - 1]?.dateDisplay || "";
+
+  if (!periodoInicio || !periodoFim) {
+    showToast("Nenhum período carregado. Gere a lista de dias primeiro.", "error");
+    return;
+  }
 
   showLoading(true);
   try {
@@ -409,8 +426,6 @@ async function checkDuplicateAndSave() {
     showLoading(false);
     console.error("Erro ao verificar duplicata:", error);
     // Em caso de erro na verificação, deixar salvar normalmente
-    const periodoInicio = state.days[0]?.dateDisplay || "";
-    const periodoFim = state.days[state.days.length - 1]?.dateDisplay || "";
     showNormalSaveModal(colaborador, periodoInicio, periodoFim);
   }
 }
@@ -1051,8 +1066,11 @@ window.setStatus = setStatus;
 // ============ Salvar no Histórico ============
 
 async function saveToHistory() {
-  const colaborador = state.colaborador || elements.colaboradorName.value.trim();
-  if (!colaborador) { showToast("Informe seu nome antes de salvar", "error"); return; }
+  // Sempre reler o colaborador do campo de input para garantir valor atual
+  const colaborador = elements.colaboradorName.value.trim() || state.colaborador;
+  if (!colaborador) { showToast("Informe seu nome antes de salvar", "error"); elements.colaboradorName.focus(); return; }
+
+  if (state.days.length === 0) { showToast("Nenhum apontamento para salvar. Gere a lista de dias primeiro.", "error"); return; }
 
   const dias = state.days.map((day) => {
     const isNonWorkday = day.isWeekend || day.isHoliday || isException(day.dateDisplay);
