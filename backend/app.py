@@ -500,9 +500,10 @@ async def get_historico(
                 # mes no formato YYYY-MM → converter para dd/mm/yyyy parcial
                 try:
                     year, month = mes.strip().split("-")
+                    # Usar % para casar qualquer dia (01-31, 1-9 com 2 dígitos)
                     query += " AND (periodo_inicio LIKE ? OR periodo_fim LIKE ?)"
-                    params.append(f"_/{month}/{year}")
-                    params.append(f"_/{month}/{year}")
+                    params.append(f"%/{month}/{year}")
+                    params.append(f"%/{month}/{year}")
                 except ValueError:
                     pass  # ignorar filtro de mês inválido
 
