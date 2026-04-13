@@ -1210,116 +1210,98 @@ tr.status-ignored {
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
 }
 
-/* ============ Interval Block (hora + descrição) ============ */
 
-/* Wrapper vertical para cada intervalo */
-.interval-block {
+/* ============ Balanço Redmine (HE / Ausências) ============ */
+
+.day-balance-info {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-.interval-times {
-  display: flex;
-  gap: var(--spacing-xs);
-}
-
-.interval-times .time-input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-size: 0.85rem;
-  font-family: inherit;
-}
-
-.interval-times .time-input:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-}
-
-.interval-description {
-  width: 100%;
-  padding: 6px 8px;
-  background: rgba(26, 35, 50, 0.7);
-  border: 1px dashed rgba(148, 163, 184, 0.2);
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  font-family: inherit;
-  line-height: 1.4;
-  resize: none;
-  transition: all var(--transition-fast);
-  min-height: 42px;
-}
-
-.interval-description:focus {
-  outline: none;
-  border-color: var(--accent-secondary);
-  border-style: solid;
-  color: var(--text-primary);
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
-}
-
-.interval-description::placeholder {
+  gap: 2px;
+  font-size: 0.72rem;
   color: var(--text-muted);
-  font-style: italic;
+  min-width: 80px;
 }
 
-/* Novo layout das linhas de dia com descrição */
-.day-row.workday.with-description {
+.balance-item {
   display: flex;
-  flex-direction: column;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-md);
-  background: var(--bg-card);
-  border-radius: var(--radius-lg);
-  border-left: 3px solid transparent;
-  transition: all var(--transition-fast);
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.day-row.workday.with-description:hover {
-  border-left-color: var(--accent-primary);
-  background: var(--bg-card-hover);
+.balance-item .label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-.day-info {
-  display: flex;
+.balance-item .value {
+  font-weight: 600;
+  font-family: monospace;
+}
+
+.value.overtime {
+  color: var(--status-ok);
+}
+
+.value.absence {
+  color: var(--status-divergent);
+}
+
+.divergence-alert {
+  display: inline-flex;
   align-items: center;
-  gap: var(--spacing-md);
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: var(--status-divergent);
+  color: white;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: bold;
+  cursor: help;
+  margin-left: 4px;
 }
 
-.day-info .day-date {
-  font-weight: 700;
-  font-size: 0.95rem;
-  color: var(--text-primary);
-  min-width: 90px;
+.day-row.workday.divergent-row {
+  border-left: 3px solid var(--status-divergent);
 }
 
-.day-info .day-name {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  background: var(--bg-tertiary);
-  padding: 2px 8px;
-  border-radius: var(--radius-full);
-}
-
-.day-intervals-wrapper {
+.table-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--spacing-md);
+  gap: 15px;
+  margin-bottom: 15px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
-.day-footer-row {
+.legend-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding-top: var(--spacing-sm);
-  border-top: 1px solid var(--border-color);
+  gap: 6px;
+}
+
+.legend-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--bg-card-hover);
+  border-radius: 4px;
+  font-weight: bold;
+  font-size: 0.7rem;
+  color: var(--text-main);
+}
+
+.legend-badge.alert {
+  background: var(--status-divergent);
+  color: white;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
 }
 
 /* ============ Save Confirmation ============ */
@@ -2253,10 +2235,6 @@ tr.status-ignored {
     gap: var(--spacing-sm);
   }
 
-  .interval-times .time-input {
-    font-size: 1rem;
-    padding: var(--spacing-sm);
-  }
 
   .interval-description {
     font-size: 0.85rem;
@@ -2270,13 +2248,6 @@ tr.status-ignored {
     font-size: 1.2rem;
   }
 
-  .interval-times {
-    flex-direction: column;
-  }
-
-  .interval-times .time-input {
-    width: 100%;
-  }
 
   .summary-cards {
     grid-template-columns: 1fr;

@@ -89,6 +89,8 @@ async function initializeApp() {
   setDefaultDates();
   // Verificar se já há histórico para exibir o botão flutuante
   checkAndShowFloatBtn();
+  // Iniciar ping anti-sono para o Render
+  setupAntiSleepPing();
 }
 
 // ============ API Calls ============
@@ -298,9 +300,10 @@ async function handleSingleDateChange() {
       isHoliday,
       holidayName,
       intervals: [
-        { entry: "", exit: "", description: "" },
-        { entry: "", exit: "", description: "" },
+        { entry: "", exit: "" },
       ],
+      overtime: "00:00",
+      absence: "00:00",
       totalHours: 0,
       status: "pending",
     };
@@ -575,9 +578,10 @@ async function generateDaysList() {
         isHoliday: !!state.holidays[dateAPI],
         holidayName: state.holidays[dateAPI] || null,
         intervals: [
-          { entry: "", exit: "", description: "" },
-          { entry: "", exit: "", description: "" },
+          { entry: "", exit: "" },
         ],
+        overtime: "00:00",
+        absence: "00:00",
         totalHours: 0,
         status: "pending",
       });
@@ -623,47 +627,47 @@ function renderDaysList() {
         `;
       }
 
-      // Intervalos com descrição
-      const intervalsHtml = day.intervals.map((interval, intervalIndex) => `
-        <div class="interval-block">
-          <div class="interval-times">
-            <input type="time" class="time-input" value="${interval.entry}"
-                   onchange="updateIntervalTime(${index}, ${intervalIndex}, 'entry', this.value)"
-                   placeholder="08:00" title="Entrada ${intervalIndex + 1}">
-            <input type="time" class="time-input" value="${interval.exit}"
-                   onchange="updateIntervalTime(${index}, ${intervalIndex}, 'exit', this.value)"
-                   placeholder="12:00" title="Saída ${intervalIndex + 1}">
-          </div>
-          <textarea class="interval-description"
-                    rows="2"
-                    placeholder="Descreva as atividades deste período..."
-                    onchange="updateIntervalDescription(${index}, ${intervalIndex}, this.value)"
-                    title="Descrição do intervalo ${intervalIndex + 1}">${interval.description || ""}</textarea>
-        </div>
-      `).join('');
+      // Intervalos sem wrapper e sem espaços para alinhar com o grid
+      const intervalsHtml = day.intervals.map((interval, intervalIndex) => 
+        `<input type="time" class="time-input" value="${interval.entry}" onchange="updateIntervalTime(${index}, ${intervalIndex}, 'entry', this.value)" placeholder="08:00" title="Entrada ${intervalIndex + 1}"><input type="time" class="time-input" value="${interval.exit}" onchange="updateIntervalTime(${index}, ${intervalIndex}, 'exit', this.value)" placeholder="12:00" title="Saída ${intervalIndex + 1}">`
+      ).join('');
+
+      // Espaços vazios se houver apenas 1 intervalo, para manter o Total na coluna correta
+      const placeholders = day.intervals.length === 1 ? '<span></span><span></span>' : '';
 
       const actionsHtml = `
         <div class="day-actions">
           <button type="button" class="btn-add-interval" onclick="addInterval(${index})" title="Adicionar intervalo">➕</button>
-          ${day.intervals.length > 2 ? `
+          ${day.intervals.length > 1 ? `
           <button type="button" class="btn-remove-interval" onclick="removeLastInterval(${index})" title="Remover último intervalo">➖</button>
           ` : ''}
         </div>
       `;
 
+      // Informações de balanço (HE/Ausências) para o alerta
+      const hasBalance = day.overtime !== "00:00" || day.absence !== "00:00";
+      const balanceHtml = hasBalance ? `
+        <div class="day-balance-info">
+          <div class="balance-item"><span class="label">HE:</span><span class="value overtime">${day.overtime}</span></div>
+          <div class="balance-item"><span class="label">AUS:</span><span class="value absence">${day.absence}</span></div>
+        </div>
+      ` : '<div></div>';
+
+      // Ícone de alerta se houver divergência (calculado no calculateDayTotal)
+      const divergenceAlert = day.hasDivergence ? `
+        <span class="divergence-alert" title="Atenção: O cálculo do Redmine (8h + HE - Ausências) divergiu das marcações e foi priorizado.">!</span>
+      ` : '';
+
       return `
-        <div class="day-row workday with-description" data-index="${index}" data-intervals="${day.intervals.length}">
-          <div class="day-info">
-            <span class="day-date">${day.dateDisplay}</span>
-            <span class="day-name">${day.dayName}</span>
-          </div>
-          <div class="day-intervals-wrapper">
-            ${intervalsHtml}
-          </div>
-          <div class="day-footer-row">
-            <span class="day-total" id="total-${index}">${formatTotalHours(day.totalHours)}</span>
-            ${actionsHtml}
-          </div>
+        <div class="day-row workday ${day.hasDivergence ? 'divergent-row' : ''}" data-index="${index}" data-intervals="${day.intervals.length}">
+          <span class="day-date">${day.dateDisplay}</span>
+          <span class="day-name">${day.dayName}</span>
+          ${intervalsHtml}${placeholders}
+          ${balanceHtml}
+          <span class="day-total" id="total-${index}">
+            ${formatTotalHours(day.totalHours)}${divergenceAlert}
+          </span>
+          ${actionsHtml}
         </div>
       `;
     })
@@ -677,12 +681,8 @@ function updateIntervalTime(dayIndex, intervalIndex, field, value) {
   calculateDayTotal(dayIndex);
 }
 
-function updateIntervalDescription(dayIndex, intervalIndex, value) {
-  state.days[dayIndex].intervals[intervalIndex].description = value;
-}
-
 function addInterval(dayIndex) {
-  state.days[dayIndex].intervals.push({ entry: "", exit: "", description: "" });
+  state.days[dayIndex].intervals.push({ entry: "", exit: "" });
   renderDaysList();
 }
 
@@ -695,7 +695,7 @@ function removeInterval(dayIndex, intervalIndex) {
 }
 
 function removeLastInterval(dayIndex) {
-  if (state.days[dayIndex].intervals.length > 2) {
+  if (state.days[dayIndex].intervals.length > 1) {
     state.days[dayIndex].intervals.pop();
     calculateDayTotal(dayIndex);
     renderDaysList();
@@ -715,6 +715,23 @@ function calculateDayTotal(dayIndex) {
   }
 
   day.totalHours = totalMinutes / 60;
+  
+  // NOVA LÓGICA: Cálculo Redmine (8h + HE - Ausências)
+  const baseMinutes = 8 * 60;
+  const heMinutes = timeToMinutes(day.overtime || "00:00");
+  const absMinutes = timeToMinutes(day.absence || "00:00");
+  const redmineTotalHours = (baseMinutes + heMinutes - absMinutes) / 60;
+
+  // Comparação e priorização
+  // Usamos uma tolerância pequena para lidar com arredondamentos de float se necessário
+  const diff = Math.abs(day.totalHours - redmineTotalHours);
+  if ((day.overtime !== "00:00" || day.absence !== "00:00") && diff > 0.001) {
+    day.totalHours = redmineTotalHours;
+    day.hasDivergence = true;
+  } else {
+    day.hasDivergence = false;
+  }
+
   const totalElement = document.getElementById(`total-${dayIndex}`);
   if (totalElement) totalElement.textContent = formatTotalHours(day.totalHours);
 }
@@ -744,7 +761,6 @@ function hoursToRedmine(hours) {
 
 // Expor funções para uso global (onclick inline no HTML)
 window.updateIntervalTime = updateIntervalTime;
-window.updateIntervalDescription = updateIntervalDescription;
 window.addInterval = addInterval;
 window.removeInterval = removeInterval;
 window.removeLastInterval = removeLastInterval;
@@ -760,24 +776,48 @@ function parsePastedTimesheet(text) {
   let expectingTime = null;
   let currentEntry = null;
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const dateMatch = line.match(dateRegex);
+    
     if (dateMatch) {
-      if (currentDay && currentDay.intervals.length > 0) result.push(currentDay);
-      currentDay = { date: dateMatch[1], intervals: [] };
+      if (currentDay && (currentDay.intervals.length > 0 || currentDay.overtime !== "00:00" || currentDay.absence !== "00:00")) {
+        result.push(currentDay);
+      }
+      currentDay = { 
+        date: dateMatch[1], 
+        intervals: [],
+        overtime: "00:00",
+        absence: "00:00"
+      };
       currentEntry = null;
       expectingTime = null;
       continue;
     }
+
     if (!currentDay) continue;
 
     const lowerLine = line.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    
+    // Detecção de HE e Ausências
+    if (lowerLine.includes('horas extras')) {
+      const val = line.match(/(\d{2}:\d{2})/) ? line.match(/(\d{2}:\d{2})/)[1] : (lines[i+1] && lines[i+1].match(/(\d{2}:\d{2})/) ? lines[i+1].match(/(\d{2}:\d{2})/)[1] : null);
+      if (val) currentDay.overtime = val;
+      continue;
+    }
+    
+    if (lowerLine.includes('ausencias')) {
+      const val = line.match(/(\d{2}:\d{2})/) ? line.match(/(\d{2}:\d{2})/)[1] : (lines[i+1] && lines[i+1].match(/(\d{2}:\d{2})/) ? lines[i+1].match(/(\d{2}:\d{2})/)[1] : null);
+      if (val) currentDay.absence = val;
+      continue;
+    }
+
     if (lowerLine === 'entrada') { expectingTime = 'entry'; continue; }
     if (lowerLine === 'saida') { expectingTime = 'exit'; continue; }
 
     if (timeRegex.test(line) && expectingTime) {
       if (expectingTime === 'entry') {
-        currentEntry = { entry: line, exit: '', description: '' };
+        currentEntry = { entry: line, exit: '' };
       } else if (expectingTime === 'exit' && currentEntry) {
         currentEntry.exit = line;
         currentDay.intervals.push({ ...currentEntry });
@@ -786,7 +826,9 @@ function parsePastedTimesheet(text) {
       expectingTime = null;
     }
   }
-  if (currentDay && currentDay.intervals.length > 0) result.push(currentDay);
+  if (currentDay && (currentDay.intervals.length > 0 || currentDay.overtime !== "00:00" || currentDay.absence !== "00:00")) {
+    result.push(currentDay);
+  }
   return result;
 }
 
@@ -801,13 +843,14 @@ function applyPastedData(parsedDays) {
     if (day.isWeekend || day.isHoliday || isException(day.dateDisplay)) continue;
 
     while (day.intervals.length < parsed.intervals.length) {
-      day.intervals.push({ entry: '', exit: '', description: '' });
+      day.intervals.push({ entry: '', exit: '' });
     }
     for (let i = 0; i < parsed.intervals.length; i++) {
       day.intervals[i].entry = parsed.intervals[i].entry;
       day.intervals[i].exit = parsed.intervals[i].exit;
-      // Mantém a descrição existente ao colar
     }
+    day.overtime = parsed.overtime || "00:00";
+    day.absence = parsed.absence || "00:00";
     calculateDayTotal(dayIndex);
     filledCount++;
     filledIndices.push(dayIndex);
@@ -1080,8 +1123,9 @@ async function saveToHistory() {
       intervals: day.intervals.map((iv) => ({
         entry: iv.entry || "",
         exit: iv.exit || "",
-        description: iv.description || "",
       })),
+      overtime: day.overtime || "00:00",
+      absence: day.absence || "00:00",
       total_hours: day.totalHours || 0,
       is_ignored: isNonWorkday,
       ignore_reason: isNonWorkday
@@ -1263,24 +1307,26 @@ async function viewHistoryDetail(id) {
             ? `<span class="detail-interval-time">${iv.entry} → ${iv.exit}</span>`
             : `<span class="detail-interval-time detail-interval-incomplete">(incompleto)</span>`;
 
-          const descHtml = iv.description
-            ? `<p class="detail-interval-desc">${iv.description}</p>`
-            : `<p class="detail-interval-desc detail-no-desc">Sem descrição informada</p>`;
-
           return `
             <div class="detail-interval">
               <div class="detail-interval-header">
                 <span class="detail-interval-badge">Intervalo ${idx + 1}</span>
                 ${timeRange}
               </div>
-              ${descHtml}
             </div>
           `;
         }).join("");
 
       const totalHorasDay = day.total_hours > 0
-        ? `<span class="detail-day-total">${day.total_hours.toFixed(2)}h</span>`
+        ? `<span class="detail-day-total">${day.total_hours.toFixed(2)}h (${formatTotalHours(day.total_hours)})</span>`
         : ``;
+
+      const balanceHtml = (day.overtime && day.overtime !== "00:00") || (day.absence && day.absence !== "00:00") ? `
+        <div class="detail-balance" style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color); font-size: 0.8rem; display: flex; gap: 15px;">
+          <span><strong>Horas Extras:</strong> ${day.overtime || "00:00"}</span>
+          <span><strong>Ausências:</strong> ${day.absence || "00:00"}</span>
+        </div>
+      ` : '';
 
       return `
         <div class="detail-day-card">
@@ -1294,6 +1340,7 @@ async function viewHistoryDetail(id) {
           <div class="detail-intervals">
             ${intervalsHtml || `<p class="detail-no-desc">Nenhum intervalo preenchido</p>`}
           </div>
+          ${balanceHtml}
         </div>
       `;
     }).join("");
@@ -1309,6 +1356,11 @@ async function viewHistoryDetail(id) {
       : "";
 
     bodyEl.innerHTML = `
+      <div class="table-legend">
+        <span class="legend-item"><span class="legend-badge">HE</span> Horas Extras</span>
+        <span class="legend-item"><span class="legend-badge">AUS</span> Ausências</span>
+        <span class="legend-item"><span class="legend-badge alert">!</span> Divergência</span>
+      </div>
       <div class="detail-days-list">${diasHtml}</div>
       ${ignoradosHtml}
     `;
@@ -1381,4 +1433,24 @@ async function checkAndShowFloatBtn() {
     // Silencioso — sem aviso ao usuário
     console.warn("Não foi possível verificar histórico na inicialização:", error);
   }
+}
+
+/**
+ * Mantém a aplicação ativa no Render fazendo um ping periódico.
+ */
+function setupAntiSleepPing() {
+  const TEN_MINUTES = 10 * 60 * 1000;
+  
+  // Ping imediato e depois a cada 10 minutos
+  const ping = async () => {
+    try {
+      console.log(`[Anti-Sleep] Pingando API em ${new Date().toLocaleTimeString()}...`);
+      await fetch(`${API_BASE}/api/health`).catch(() => {});
+    } catch (error) {
+      console.warn("[Anti-Sleep] Falha no ping:", error);
+    }
+  };
+
+  ping();
+  setInterval(ping, TEN_MINUTES);
 }

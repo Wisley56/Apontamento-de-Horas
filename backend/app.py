@@ -129,7 +129,6 @@ class ExportRequest(BaseModel):
 class IntervalDetail(BaseModel):
     entry: str = ""
     exit: str = ""
-    description: str = ""
 
 
 class DayDetail(BaseModel):
@@ -137,6 +136,8 @@ class DayDetail(BaseModel):
     day_name: str
     intervals: List[IntervalDetail]
     total_hours: float = 0.0
+    overtime: Optional[str] = "00:00"
+    absence: Optional[str] = "00:00"
     is_ignored: bool = False
     ignore_reason: str = ""
 
@@ -150,6 +151,12 @@ class SaveRequest(BaseModel):
 
 
 # ============ ENDPOINTS ============
+
+@app.get("/api/health")
+async def health_check():
+    """Endpoint para manter a aplicação ativa (anti-sleep)"""
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
 # NOTA: A raiz "/" é servida automaticamente pelo StaticFiles(html=True) no final do arquivo
 
 
