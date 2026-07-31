@@ -14,6 +14,7 @@ const state = {
   days: [],      // Lista de dias gerados
   holidays: {},  // Feriados detectados
   colaborador: "", // Nome do colaborador
+  historyRecords: [], // Histórico mesclado (local + servidor) da última carga
 };
 
 // ============ Elementos DOM ============
@@ -87,15 +88,128 @@ async function initializeApp() {
   await loadStates();
   setupEventListeners();
   setDefaultDates();
+  restoreColaboradorName();
   // Verificar se já há histórico para exibir o botão flutuante
   checkAndShowFloatBtn();
   // Iniciar ping anti-sono para o Render
   setupAntiSleepPing();
 }
 
+function restoreColaboradorName() {
+  try {
+    const saved = localStorage.getItem(LS_COLAB_KEY);
+    if (saved && elements.colaboradorName) {
+      elements.colaboradorName.value = saved;
+      state.colaborador = saved;
+    }
+  } catch { /* localStorage indisponível */ }
+}
+
 // ============ API Calls ============
 
 const API_BASE = window.APP_CONFIG?.API_URL || '';
+
+// ============ Persistência Local (localStorage) ============
+// O histórico é salvo primeiro no navegador (nunca se perde) e sincronizado
+// com o servidor em segundo plano. Se o servidor gratuito do Render reiniciar
+// e perder o banco, os registros locais são reenviados automaticamente.
+
+const LS_HISTORY_KEY = "apnt_history_v1";
+const LS_COLAB_KEY = "apnt_colaborador";
+
+const ACTIVITY_TYPES = ["Melhoria", "Correção", "Suporte"];
+
+function generateUUID() {
+  if (window.crypto?.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+function getLocalHistory() {
+  try {
+    const data = JSON.parse(localStorage.getItem(LS_HISTORY_KEY));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function setLocalHistory(records) {
+  try {
+    localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(records));
+  } catch (e) {
+    console.warn("Não foi possível salvar o histórico no navegador:", e);
+  }
+}
+
+function upsertLocalRecord(record) {
+  const records = getLocalHistory();
+  const idx = records.findIndex((r) => r.uuid === record.uuid);
+  if (idx >= 0) records[idx] = { ...records[idx], ...record };
+  else records.unshift(record);
+  setLocalHistory(records);
+}
+
+function removeLocalRecord(uuid) {
+  setLocalHistory(getLocalHistory().filter((r) => r.uuid !== uuid));
+}
+
+// Lápides de exclusão: uuids excluídos aqui que ainda precisam ser removidos
+// do servidor (evita que registros excluídos "ressuscitem" na sincronização).
+const LS_DELETED_KEY = "apnt_deleted_uuids_v1";
+
+function getDeletedUuids() {
+  try {
+    const data = JSON.parse(localStorage.getItem(LS_DELETED_KEY));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function addDeletedUuid(uuid) {
+  const deleted = getDeletedUuids();
+  if (!deleted.includes(uuid)) {
+    deleted.push(uuid);
+    try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted)); } catch { /* ignore */ }
+  }
+}
+
+function clearDeletedUuid(uuid) {
+  try {
+    localStorage.setItem(LS_DELETED_KEY, JSON.stringify(getDeletedUuids().filter((u) => u !== uuid)));
+  } catch { /* ignore */ }
+}
+
+function parseCreatedAt(str) {
+  if (!str) return 0;
+  const m = str.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
+  if (!m) return 0;
+  return new Date(m[3], m[2] - 1, m[1], m[4], m[5]).getTime();
+}
+
+function parseBrDate(str) {
+  if (!str) return null;
+  const [day, month, year] = str.split("/");
+  const d = new Date(year, month - 1, day);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function periodsOverlap(inicioA, fimA, inicioB, fimB) {
+  const a1 = parseBrDate(inicioA), a2 = parseBrDate(fimA);
+  const b1 = parseBrDate(inicioB), b2 = parseBrDate(fimB);
+  if (!a1 || !a2 || !b1 || !b2) return false;
+  return !(a2 < b1 || a1 > b2);
+}
+
+function normalizeTipo(tipo) {
+  return (tipo || "")
+    .toLowerCase()
+    .normalize("NFD") // remove acentos: Correção -> correcao
+    .replace(/[̀-ͯ]/g, "");
+}
 
 async function apiCall(endpoint, method = "GET", data = null) {
   const options = {
@@ -162,10 +276,33 @@ function setupEventListeners() {
     elements.pasteHoursBtn.addEventListener("click", handlePasteButtonClick);
   }
 
-  // Colaborador
+  // Colaborador (lembrado entre visitas)
   elements.colaboradorName.addEventListener("input", (e) => {
     state.colaborador = e.target.value.trim();
+    try { localStorage.setItem(LS_COLAB_KEY, state.colaborador); } catch { /* ignore */ }
   });
+
+  // Definir tipo de atividade para todos os dias
+  const setAllTypeSelect = document.getElementById("set-all-type");
+  if (setAllTypeSelect) {
+    setAllTypeSelect.addEventListener("change", (e) => {
+      if (e.target.value) setAllDayTypes(e.target.value);
+    });
+  }
+
+  // Backup / Restauração do histórico
+  const exportBackupBtn = document.getElementById("export-backup-btn");
+  const importBackupBtn = document.getElementById("import-backup-btn");
+  const importBackupInput = document.getElementById("import-backup-input");
+  if (exportBackupBtn) exportBackupBtn.addEventListener("click", exportBackup);
+  if (importBackupBtn && importBackupInput) {
+    importBackupBtn.addEventListener("click", () => importBackupInput.click());
+    importBackupInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (file) importBackup(file);
+      e.target.value = "";
+    });
+  }
 
   // Salvar no histórico
   if (elements.saveHistoryBtn) {
@@ -245,12 +382,20 @@ function toggleSelectionType(type) {
     elements.singleDateGroup.style.display = "none";
     if (elements.stateSelectGroup) elements.stateSelectGroup.style.display = "block";
     elements.generateDaysBtn.style.display = "flex";
+    // Restaurar required nos campos visíveis de período
+    elements.startDate.setAttribute("required", "");
+    elements.endDate.setAttribute("required", "");
+    elements.stateSelect.setAttribute("required", "");
   } else {
     elements.startDateGroup.style.display = "none";
     elements.endDateGroup.style.display = "none";
     elements.singleDateGroup.style.display = "block";
     if (elements.stateSelectGroup) elements.stateSelectGroup.style.display = "none";
     elements.generateDaysBtn.style.display = "none";
+    // Remover required dos campos ocultos para não bloquear o submit
+    elements.startDate.removeAttribute("required");
+    elements.endDate.removeAttribute("required");
+    elements.stateSelect.removeAttribute("required");
     setTimeout(() => { if (elements.singleDate.value) handleSingleDateChange(); }, 100);
   }
 
@@ -411,6 +556,17 @@ async function checkDuplicateAndSave() {
     return;
   }
 
+  // Verificação local primeiro (funciona mesmo com o servidor dormindo)
+  const localConflicts = getLocalHistory().filter(
+    (r) =>
+      r.colaborador?.toLowerCase() === colaborador.toLowerCase() &&
+      periodsOverlap(periodoInicio, periodoFim, r.periodo_inicio, r.periodo_fim)
+  );
+  if (localConflicts.length > 0) {
+    showDuplicateWarningModal(colaborador, localConflicts);
+    return;
+  }
+
   showLoading(true);
   try {
     const params = new URLSearchParams({ colaborador, periodo_inicio: periodoInicio, periodo_fim: periodoFim });
@@ -446,7 +602,7 @@ function showDuplicateWarningModal(colaborador, conflitos) {
     dupListEl.innerHTML = conflitos.map(rec => `
       <div class="dup-record-item">
         <span class="dup-record-period">📅 ${rec.periodo_inicio} → ${rec.periodo_fim}</span>
-        <span class="dup-record-total">⏱️ ${rec.total_horas.toFixed(2)}h</span>
+        <span class="dup-record-total">⏱️ ${(rec.total_horas || 0).toFixed(2)}h</span>
         <span class="dup-record-date">🕐 Salvo: ${rec.criado_em}</span>
       </div>
     `).join("");
@@ -961,15 +1117,11 @@ window.removeException = removeException;
 
 async function handleSubmit(e) {
   e.preventDefault();
+  // Impedir que o navegador bloqueie o submit por validação nativa do campo nome
+  // (o nome é opcional para análise — obrigatório apenas ao salvar no histórico)
+  e.stopImmediatePropagation();
 
-  // Validar colaborador
-  const colaborador = elements.colaboradorName.value.trim();
-  if (!colaborador) {
-    showToast("Por favor, informe seu nome antes de analisar", "error");
-    elements.colaboradorName.focus();
-    return;
-  }
-  state.colaborador = colaborador;
+  state.colaborador = elements.colaboradorName.value.trim();
 
   if (state.days.length === 0) { showToast("Gere a lista de dias primeiro", "error"); return; }
 
@@ -1003,7 +1155,7 @@ async function handleSubmit(e) {
 
       results.push({
         date: day.dateDisplay, day_of_week: day.dayName,
-        worked_time: workedTime, redmine_value: redmineValue, day_type: "",
+        worked_time: workedTime, redmine_value: redmineValue, day_type: day.activityType || "",
         status: day.status,
         status_description: day.status === "ok" ? "✔ Confere" : day.status === "divergent" ? "✘ Divergente" : "⏳ Pendente",
         css_class: day.status === "ok" ? "status-ok" : day.status === "divergent" ? "status-divergent" : "",
@@ -1033,7 +1185,7 @@ async function handleSubmit(e) {
   }
 
   elements.resultsSection.scrollIntoView({ behavior: "smooth" });
-  showToast(`Análise concluída, ${colaborador}!`, "success");
+  showToast(state.colaborador ? `Análise concluída, ${state.colaborador}!` : "Análise concluída!", "success");
 }
 
 // ============ Render Results ============
@@ -1072,8 +1224,24 @@ function renderTable(days) {
           <td>${day.date}</td>
           <td>${day.day_of_week}</td>
           <td>${day.worked_time}</td>
-          <td><strong>${day.redmine_value}</strong></td>
-          <td>${day.day_type || "—"}</td>
+          <td>
+            ${!day.is_ignored
+              ? `<span class="redmine-value-cell">
+                  <strong>${day.redmine_value}</strong>
+                  <button type="button" class="btn-copy-value" onclick="copyRedmineValue(${index})" title="Copiar valor para lançar no Redmine">📋</button>
+                </span>`
+              : `<strong>${day.redmine_value}</strong>`
+            }
+          </td>
+          <td>
+            ${!day.is_ignored
+              ? `<select class="tipo-select ${day.day_type ? 'tipo-' + normalizeTipo(day.day_type) : ''}" onchange="setDayType(${index}, this.value)" title="Tipo de atividade no Redmine">
+                  <option value="">Selecionar…</option>
+                  ${ACTIVITY_TYPES.map((t) => `<option value="${t}" ${day.day_type === t ? "selected" : ""}>${t}</option>`).join("")}
+                </select>`
+              : `${day.day_type || "—"}`
+            }
+          </td>
           <td>
             ${!day.is_ignored
               ? `<div class="status-selector">
@@ -1089,6 +1257,64 @@ function renderTable(days) {
     )
     .join("");
 }
+
+function setDayType(index, tipo) {
+  if (!state.results) return;
+  const resultDay = state.results.days[index];
+  if (resultDay.is_ignored) return;
+
+  resultDay.day_type = tipo;
+  const originalDay = state.days.find((d) => d.dateDisplay === resultDay.date);
+  if (originalDay) originalDay.activityType = tipo;
+
+  // Atualizar diretamente a célula do tipo na linha correspondente para feedback imediato
+  updateTipoCellInDOM(index, tipo);
+}
+
+function setAllDayTypes(tipo) {
+  if (!state.results) return;
+  let count = 0;
+  state.results.days.forEach((resultDay, idx) => {
+    if (resultDay.is_ignored) return;
+    resultDay.day_type = tipo;
+    const originalDay = state.days.find((d) => d.dateDisplay === resultDay.date);
+    if (originalDay) originalDay.activityType = tipo;
+    count++;
+    // Atualizar cada dropdown individual na tabela
+    updateTipoCellInDOM(idx, tipo);
+  });
+  showToast(`🏷️ Tipo "${tipo}" aplicado a ${count} dia(s)`, "success");
+}
+
+/**
+ * Atualiza diretamente o dropdown de tipo na linha da tabela de resultados,
+ * sem re-renderizar toda a tabela (garante feedback visual imediato).
+ */
+function updateTipoCellInDOM(index, tipo) {
+  const row = elements.resultsBody.querySelector(`tr[data-index="${index}"]`);
+  if (!row) return;
+  const select = row.querySelector('select.tipo-select');
+  if (select) {
+    select.value = tipo;
+    // Atualizar classes CSS de estilo do dropdown
+    select.className = `tipo-select ${tipo ? 'tipo-' + normalizeTipo(tipo) : ''}`;
+  }
+}
+
+async function copyRedmineValue(index) {
+  if (!state.results) return;
+  const value = state.results.days[index]?.redmine_value;
+  if (!value || value === "----") return;
+  try {
+    await navigator.clipboard.writeText(value);
+    showToast(`📋 "${value}" copiado!`, "success");
+  } catch {
+    showToast("Não foi possível copiar. Selecione e copie manualmente.", "error");
+  }
+}
+
+window.setDayType = setDayType;
+window.copyRedmineValue = copyRedmineValue;
 
 function setStatus(index, status) {
   if (!state.results) return;
@@ -1126,6 +1352,7 @@ async function saveToHistory() {
       })),
       overtime: day.overtime || "00:00",
       absence: day.absence || "00:00",
+      activity_type: day.activityType || "",
       total_hours: day.totalHours || 0,
       is_ignored: isNonWorkday,
       ignore_reason: isNonWorkday
@@ -1140,34 +1367,59 @@ async function saveToHistory() {
   const periodoInicio = state.days[0]?.dateDisplay || "";
   const periodoFim = state.days[state.days.length - 1]?.dateDisplay || "";
 
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const criadoEm = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  const record = {
+    uuid: generateUUID(),
+    colaborador,
+    periodo_inicio: periodoInicio,
+    periodo_fim: periodoFim,
+    total_horas: totalHoras,
+    criado_em: criadoEm,
+    dias,
+    synced: false,
+    server_id: null,
+  };
+
+  // 1) Salvar no navegador primeiro — garantido mesmo se o servidor estiver fora
+  upsertLocalRecord(record);
+
+  // 2) Sincronizar com o servidor (best-effort)
   showLoading(true);
   try {
-    await apiCall("/api/salvar-apontamento", "POST", {
+    const response = await apiCall("/api/salvar-apontamento", "POST", {
+      uuid: record.uuid,
       colaborador,
       periodo_inicio: periodoInicio,
       periodo_fim: periodoFim,
       total_horas: totalHoras,
+      criado_em: criadoEm,
       dias,
     });
-
-    showToast("✅ Apontamento salvo no histórico!", "success");
-
-    // Esconder bloco de confirmação após salvar
-    if (elements.saveConfirmation) {
-      elements.saveConfirmation.style.opacity = "0";
-      setTimeout(() => { elements.saveConfirmation.style.display = "none"; }, 400);
-    }
-
-    // Carregar e mostrar o histórico
-    await loadHistory();
-    elements.historySection.style.display = "block";
-    elements.historySection.scrollIntoView({ behavior: "smooth" });
+    const data = await response.json();
+    record.synced = true;
+    record.server_id = data.id;
+    upsertLocalRecord(record);
+    showToast("✅ Apontamento salvo e sincronizado!", "success");
   } catch (error) {
-    console.error("Erro ao salvar:", error);
-    showToast(`Erro ao salvar: ${error.message}`, "error");
+    console.warn("Servidor indisponível, registro guardado localmente:", error);
+    showToast("💾 Salvo no navegador! Será sincronizado quando o servidor acordar.", "success");
   } finally {
     showLoading(false);
   }
+
+  // Esconder bloco de confirmação após salvar
+  if (elements.saveConfirmation) {
+    elements.saveConfirmation.style.opacity = "0";
+    setTimeout(() => { elements.saveConfirmation.style.display = "none"; }, 400);
+  }
+
+  // Carregar e mostrar o histórico
+  await loadHistory();
+  elements.historySection.style.display = "block";
+  elements.historySection.scrollIntoView({ behavior: "smooth" });
 }
 
 // ============ Histórico ============
@@ -1176,29 +1428,140 @@ async function loadHistory() {
   const colaborador = elements.filterColaborador?.value?.trim() || "";
   const mes = elements.filterMes?.value || "";
 
-  let endpoint = "/api/historico";
-  const params = [];
-  if (colaborador) params.push(`colaborador=${encodeURIComponent(colaborador)}`);
-  if (mes) params.push(`mes=${encodeURIComponent(mes)}`);
-  if (params.length > 0) endpoint += "?" + params.join("&");
+  const localRecords = getLocalHistory();
 
+  // Buscar do servidor (best-effort — o histórico local funciona offline)
+  let serverRecords = [];
+  let serverOk = false;
   try {
-    const response = await apiCall(endpoint);
+    const response = await apiCall("/api/historico");
     const data = await response.json();
-    renderHistoryCards(data.registros || []);
-    elements.historySection.style.display = "block";
-    // Ocultar botão flutuante quando o histórico está visível
-    const floatBtn = document.getElementById("float-history-btn");
-    if (floatBtn) floatBtn.style.display = "none";
+    serverRecords = data.registros || [];
+    serverOk = true;
   } catch (error) {
-    console.error("Erro ao carregar histórico:", error);
-    if (elements.historyList) {
-      elements.historyList.innerHTML = `<p class="history-empty">Erro ao carregar o histórico. Tente novamente.</p>`;
+    console.warn("Servidor indisponível — exibindo histórico local:", error);
+  }
+
+  // Reenviar registros locais que o servidor perdeu (em segundo plano)
+  if (serverOk) syncLocalToServer(localRecords, serverRecords);
+
+  const merged = mergeHistory(localRecords, serverRecords);
+  const filtered = merged.filter((rec) => matchesHistoryFilters(rec, colaborador, mes));
+
+  state.historyRecords = filtered;
+  renderHistoryCards(filtered, serverOk);
+  elements.historySection.style.display = "block";
+  // Ocultar botão flutuante quando o histórico está visível
+  const floatBtn = document.getElementById("float-history-btn");
+  if (floatBtn) floatBtn.style.display = "none";
+}
+
+function mergeHistory(localRecords, serverRecords) {
+  const merged = localRecords.map((r) => ({ ...r }));
+  const byUuid = new Map(merged.map((r) => [r.uuid, r]));
+  const deleted = new Set(getDeletedUuids());
+
+  for (const s of serverRecords) {
+    if (s.uuid && deleted.has(s.uuid)) continue; // excluído aqui, pendente no servidor
+    if (s.uuid && byUuid.has(s.uuid)) {
+      const local = byUuid.get(s.uuid);
+      local.synced = true;
+      local.server_id = s.id;
+    } else {
+      // Registro que existe apenas no servidor (ex.: salvo em outro navegador)
+      merged.push({
+        uuid: s.uuid || `srv-${s.id}`,
+        server_id: s.id,
+        colaborador: s.colaborador,
+        periodo_inicio: s.periodo_inicio,
+        periodo_fim: s.periodo_fim,
+        total_horas: s.total_horas,
+        criado_em: s.criado_em,
+        synced: true,
+        serverOnly: true,
+      });
     }
+  }
+
+  merged.sort((a, b) => parseCreatedAt(b.criado_em) - parseCreatedAt(a.criado_em));
+  return merged;
+}
+
+function matchesHistoryFilters(rec, colaborador, mes) {
+  if (colaborador && !(rec.colaborador || "").toLowerCase().includes(colaborador.toLowerCase())) {
+    return false;
+  }
+  if (mes) {
+    const [year, month] = mes.split("-");
+    const suffix = `/${month}/${year}`;
+    const inicio = rec.periodo_inicio || "";
+    const fim = rec.periodo_fim || "";
+    if (!inicio.endsWith(suffix) && !fim.endsWith(suffix)) return false;
+  }
+  return true;
+}
+
+/**
+ * Reenvia ao servidor os registros que existem apenas no navegador.
+ * É assim que o histórico "renasce" depois que o Render free tier reinicia.
+ */
+async function syncLocalToServer(localRecords, serverRecords) {
+  const serverUuids = new Set(serverRecords.map((r) => r.uuid).filter(Boolean));
+  let resynced = 0;
+
+  // Concluir exclusões pendentes no servidor
+  for (const deletedUuid of getDeletedUuids()) {
+    const serverRec = serverRecords.find((r) => r.uuid === deletedUuid);
+    if (!serverRec) {
+      clearDeletedUuid(deletedUuid); // já não existe no servidor
+      continue;
+    }
+    try {
+      await apiCall(`/api/historico/${serverRec.id}`, "DELETE");
+      clearDeletedUuid(deletedUuid);
+    } catch {
+      break; // servidor fora — tenta na próxima
+    }
+  }
+
+  for (const rec of localRecords) {
+    if (serverUuids.has(rec.uuid)) {
+      if (!rec.synced) {
+        rec.synced = true;
+        upsertLocalRecord(rec);
+      }
+      continue;
+    }
+    if (!rec.dias) continue; // sem detalhes não há o que reenviar
+
+    try {
+      const response = await apiCall("/api/salvar-apontamento", "POST", {
+        uuid: rec.uuid,
+        colaborador: rec.colaborador,
+        periodo_inicio: rec.periodo_inicio,
+        periodo_fim: rec.periodo_fim,
+        total_horas: rec.total_horas || 0,
+        criado_em: rec.criado_em,
+        dias: rec.dias,
+      });
+      const data = await response.json();
+      rec.synced = true;
+      rec.server_id = data.id;
+      upsertLocalRecord(rec);
+      resynced++;
+    } catch (error) {
+      console.warn("Falha ao re-sincronizar registro:", rec.uuid, error);
+      break; // servidor provavelmente fora — tenta de novo na próxima carga
+    }
+  }
+
+  if (resynced > 0) {
+    console.info(`[Sync] ${resynced} registro(s) re-sincronizado(s) com o servidor.`);
+    loadHistory(); // atualiza os badges de sincronização
   }
 }
 
-function renderHistoryCards(records) {
+function renderHistoryCards(records, serverOk = true) {
   if (!elements.historyList) return;
 
   if (records.length === 0) {
@@ -1206,19 +1569,31 @@ function renderHistoryCards(records) {
       <div class="history-empty">
         <span>📭</span>
         <p>Nenhum registro encontrado.</p>
+        ${!serverOk ? `<p class="history-offline-note">⚠️ Servidor indisponível no momento — exibindo apenas o histórico deste navegador.</p>` : ""}
       </div>
     `;
     return;
   }
 
-  elements.historyList.innerHTML = records
-    .map(
-      (rec) => `
-        <div class="history-card" data-id="${rec.id}">
+  const offlineNote = !serverOk
+    ? `<p class="history-offline-note">⚠️ Servidor indisponível — exibindo o histórico salvo neste navegador. A sincronização será retomada automaticamente.</p>`
+    : "";
+
+  elements.historyList.innerHTML = offlineNote + records
+    .map((rec) => {
+      const syncBadge = rec.synced
+        ? `<span class="sync-badge synced" title="Sincronizado com o servidor">☁️ Sincronizado</span>`
+        : `<span class="sync-badge local" title="Salvo apenas neste navegador — será sincronizado automaticamente quando o servidor estiver disponível">💾 Local</span>`;
+
+      return `
+        <div class="history-card" data-uuid="${rec.uuid}">
           <div class="history-card-main">
             <div class="history-card-person">
               <span class="history-person-icon">👤</span>
-              <strong>${rec.colaborador}</strong>
+              <div class="history-person-info">
+                <strong>${rec.colaborador}</strong>
+                ${syncBadge}
+              </div>
             </div>
             <div class="history-card-period">
               <span class="history-period-label">📅 Período:</span>
@@ -1226,7 +1601,7 @@ function renderHistoryCards(records) {
             </div>
             <div class="history-card-total">
               <span class="history-total-label">⏱️ Total Horas:</span>
-              <strong class="history-total-value">${rec.total_horas.toFixed(2)}h</strong>
+              <strong class="history-total-value">${(rec.total_horas || 0).toFixed(2)}h</strong>
             </div>
             <div class="history-card-date">
               <span class="history-date-label">🕐 Salvo em:</span>
@@ -1236,39 +1611,51 @@ function renderHistoryCards(records) {
           <div class="history-card-actions">
             <button
               class="btn-view-detail"
-              onclick="viewHistoryDetail(${rec.id})"
+              onclick="viewHistoryDetail('${rec.uuid}')"
               title="Ver detalhes das atividades"
             >👁️</button>
             <button
               class="btn-delete-history"
-              onclick="deleteHistoryRecord(${rec.id})"
+              onclick="deleteHistoryRecord('${rec.uuid}')"
               title="Excluir este registro"
             >🗑️</button>
           </div>
         </div>
-      `,
-    )
+      `;
+    })
     .join("");
 }
 
-async function deleteHistoryRecord(id) {
+async function deleteHistoryRecord(uuid) {
   if (!confirm("Deseja realmente excluir este registro do histórico?")) return;
 
-  try {
-    await apiCall(`/api/historico/${id}`, "DELETE");
-    showToast("Registro excluído!", "success");
-    await loadHistory();
-  } catch (error) {
-    console.error("Erro ao excluir:", error);
-    showToast(`Erro ao excluir: ${error.message}`, "error");
+  const rec = (state.historyRecords || []).find((r) => r.uuid === uuid);
+
+  // Remover do navegador e marcar lápide (impede "ressurreição" na sincronização)
+  removeLocalRecord(uuid);
+  addDeletedUuid(uuid);
+
+  // Remover do servidor (best-effort; se falhar, a lápide tenta de novo depois)
+  if (rec?.server_id) {
+    try {
+      await apiCall(`/api/historico/${rec.server_id}`, "DELETE");
+      clearDeletedUuid(uuid);
+    } catch (error) {
+      console.warn("Servidor indisponível — exclusão será repetida na próxima sincronização:", error);
+    }
+  } else {
+    clearDeletedUuid(uuid); // nunca chegou ao servidor
   }
+
+  showToast("Registro excluído!", "success");
+  await loadHistory();
 }
 
 window.deleteHistoryRecord = deleteHistoryRecord;
 
 // ============ Detalhe do Histórico ============
 
-async function viewHistoryDetail(id) {
+async function viewHistoryDetail(uuid) {
   const modal = document.getElementById("history-detail-modal");
   const metaEl = document.getElementById("history-detail-meta");
   const bodyEl = document.getElementById("history-detail-body");
@@ -1278,8 +1665,18 @@ async function viewHistoryDetail(id) {
   modal.style.display = "flex";
 
   try {
-    const response = await apiCall(`/api/historico/${id}`);
-    const data = await response.json();
+    const rec = (state.historyRecords || []).find((r) => r.uuid === uuid);
+    let data;
+
+    if (rec?.dias) {
+      // Registro completo disponível no navegador — sem depender do servidor
+      data = rec;
+    } else if (rec?.server_id) {
+      const response = await apiCall(`/api/historico/${rec.server_id}`);
+      data = await response.json();
+    } else {
+      throw new Error("Registro não encontrado");
+    }
 
     // Metadados
     metaEl.innerHTML = `
@@ -1287,7 +1684,7 @@ async function viewHistoryDetail(id) {
       <span class="detail-meta-sep">•</span>
       <span class="detail-meta-item">📅 ${data.periodo_inicio} → ${data.periodo_fim}</span>
       <span class="detail-meta-sep">•</span>
-      <span class="detail-meta-item">⏱️ <strong>${data.total_horas.toFixed(2)}h</strong></span>
+      <span class="detail-meta-item">⏱️ <strong>${(data.total_horas || 0).toFixed(2)}h</strong></span>
     `;
 
     // Dias com atividades
@@ -1328,12 +1725,17 @@ async function viewHistoryDetail(id) {
         </div>
       ` : '';
 
+      const tipoBadge = day.activity_type
+        ? `<span class="detail-tipo-badge tipo-${normalizeTipo(day.activity_type)}">${day.activity_type}</span>`
+        : "";
+
       return `
         <div class="detail-day-card">
           <div class="detail-day-header">
             <div class="detail-day-info">
               <strong class="detail-day-date">${day.date}</strong>
               <span class="detail-day-name">${day.day_name}</span>
+              ${tipoBadge}
             </div>
             ${totalHorasDay}
           </div>
@@ -1422,17 +1824,82 @@ function showToast(message, type = "info") {
  * Se sim, exibe o botão flutuante discreto.
  */
 async function checkAndShowFloatBtn() {
+  const floatBtn = document.getElementById("float-history-btn");
+  if (!floatBtn) return;
+
+  // Histórico local aparece na hora, sem esperar o servidor acordar
+  if (getLocalHistory().length > 0) {
+    floatBtn.style.display = "flex";
+    return;
+  }
+
   try {
     const response = await apiCall("/api/historico");
     const data = await response.json();
-    const floatBtn = document.getElementById("float-history-btn");
-    if (floatBtn && data.registros && data.registros.length > 0) {
+    if (data.registros && data.registros.length > 0) {
       floatBtn.style.display = "flex";
     }
   } catch (error) {
     // Silencioso — sem aviso ao usuário
     console.warn("Não foi possível verificar histórico na inicialização:", error);
   }
+}
+
+// ============ Backup / Restauração ============
+
+function exportBackup() {
+  const records = getLocalHistory();
+  if (records.length === 0) {
+    showToast("Nenhum registro local para exportar.", "error");
+    return;
+  }
+
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const filename = `apontamentos_backup_${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.json`;
+
+  const blob = new Blob([JSON.stringify(records, null, 2)], { type: "application/json" });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+
+  showToast(`⬇️ Backup com ${records.length} registro(s) baixado!`, "success");
+}
+
+function importBackup(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (!Array.isArray(imported)) throw new Error("Formato inválido");
+
+      const existing = getLocalHistory();
+      const existingUuids = new Set(existing.map((r) => r.uuid));
+      let added = 0;
+
+      for (const rec of imported) {
+        if (!rec.uuid || !rec.colaborador || !rec.periodo_inicio) continue;
+        if (existingUuids.has(rec.uuid)) continue;
+        existing.push({ ...rec, synced: false, server_id: null });
+        added++;
+      }
+
+      setLocalHistory(existing);
+      showToast(added > 0
+        ? `⬆️ ${added} registro(s) restaurado(s) com sucesso!`
+        : "Todos os registros do backup já existem.", "success");
+      loadHistory();
+    } catch (error) {
+      console.error("Erro ao importar backup:", error);
+      showToast("Arquivo de backup inválido.", "error");
+    }
+  };
+  reader.readAsText(file);
 }
 
 /**
