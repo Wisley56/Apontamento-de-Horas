@@ -68,9 +68,15 @@ def init_db():
                 periodo_fim TEXT NOT NULL,
                 total_horas REAL DEFAULT 0,
                 criado_em TEXT NOT NULL,
-                dados_json TEXT NOT NULL
+                dados_json TEXT NOT NULL,
+                uuid TEXT
             )
         """)
+        # Migração para bancos criados antes da coluna uuid
+        try:
+            conn.execute("ALTER TABLE apontamentos ADD COLUMN uuid TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -138,6 +144,7 @@ class DayDetail(BaseModel):
     total_hours: float = 0.0
     overtime: Optional[str] = "00:00"
     absence: Optional[str] = "00:00"
+    activity_type: Optional[str] = ""   # Melhoria, Correção ou Suporte
     is_ignored: bool = False
     ignore_reason: str = ""
 
@@ -148,6 +155,8 @@ class SaveRequest(BaseModel):
     periodo_fim: str      # dd/mm/yyyy
     total_horas: float = 0.0
     dias: List[DayDetail]
+    uuid: Optional[str] = None       # id gerado no frontend para sincronização idempotente
+    criado_em: Optional[str] = None  # preservado no re-envio de registros locais
 
 
 # ============ ENDPOINTS ============
@@ -446,7 +455,7 @@ async def salvar_apontamento(request: SaveRequest):
     Recebe: colaborador, periodo_inicio, periodo_fim, total_horas, dias (com intervalos e descrições).
     """
     try:
-        criado_em = datetime.now().strftime("%d/%m/%Y %H:%M")
+        criado_em = request.criado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
         dados_json = json.dumps(
             [d.model_dump() for d in request.dias],
             ensure_ascii=False
@@ -454,10 +463,25 @@ async def salvar_apontamento(request: SaveRequest):
 
         conn = get_db()
         try:
+            # Sincronização idempotente: se o uuid já existe, não duplica
+            if request.uuid:
+                existing = conn.execute(
+                    "SELECT id, criado_em FROM apontamentos WHERE uuid = ?",
+                    (request.uuid,)
+                ).fetchone()
+                if existing:
+                    return {
+                        "id": existing["id"],
+                        "mensagem": "Apontamento já sincronizado.",
+                        "colaborador": request.colaborador,
+                        "criado_em": existing["criado_em"],
+                        "ja_existia": True,
+                    }
+
             cursor = conn.execute(
                 """
-                INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json, uuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request.colaborador.strip(),
@@ -466,6 +490,7 @@ async def salvar_apontamento(request: SaveRequest):
                     request.total_horas,
                     criado_em,
                     dados_json,
+                    request.uuid,
                 )
             )
             conn.commit()
@@ -496,7 +521,7 @@ async def get_historico(
     try:
         conn = get_db()
         try:
-            query = "SELECT id, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em FROM apontamentos WHERE 1=1"
+            query = "SELECT id, uuid, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em FROM apontamentos WHERE 1=1"
             params = []
 
             if colaborador and colaborador.strip():
@@ -522,6 +547,7 @@ async def get_historico(
         result = [
             {
                 "id": row["id"],
+                "uuid": row["uuid"],
                 "colaborador": row["colaborador"],
                 "periodo_inicio": row["periodo_inicio"],
                 "periodo_fim": row["periodo_fim"],
