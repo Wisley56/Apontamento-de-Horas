@@ -42,13 +42,15 @@
 
             <!-- Identificação do Colaborador -->
             <div class="form-group colaborador-group" id="colaborador-group">
-              <label for="colaborador-name">👤 Seu Nome</label>
+              <label for="colaborador-name">
+                👤 Seu Nome
+                <span class="label-optional">(opcional — obrigatório apenas para salvar no histórico)</span>
+              </label>
               <input
                 type="text"
                 id="colaborador-name"
                 placeholder="Digite seu nome completo..."
                 autocomplete="name"
-                required
               />
             </div>
 
@@ -170,6 +172,7 @@
               type="submit"
               class="btn-primary"
               id="analyze-btn"
+              formnovalidate
               style="display: none"
             >
               <span class="btn-icon">🔍</span>
@@ -210,6 +213,17 @@
             </div>
           </div>
 
+          <!-- Toolbar: tipo de atividade -->
+          <div class="results-toolbar" id="results-toolbar">
+            <span class="toolbar-label">🏷️ Definir tipo para todos os dias:</span>
+            <select id="set-all-type" class="tipo-select">
+              <option value="">Selecionar…</option>
+              <option value="Melhoria">Melhoria</option>
+              <option value="Correção">Correção</option>
+              <option value="Suporte">Suporte</option>
+            </select>
+          </div>
+
           <!-- Results Table -->
           <div class="table-container">
             <table class="results-table" id="results-table">
@@ -234,10 +248,24 @@
         <section class="history-section glass-card" id="history-section" style="display: none">
           <div class="history-header">
             <h2>📁 Histórico de Lançamentos</h2>
-            <button type="button" class="btn-refresh-history" id="refresh-history-btn" title="Atualizar lista">
-              🔄
-            </button>
+            <div class="history-header-actions">
+              <button type="button" class="btn-backup" id="export-backup-btn" title="Baixar backup do histórico (arquivo JSON)">
+                ⬇️ Backup
+              </button>
+              <button type="button" class="btn-backup" id="import-backup-btn" title="Restaurar histórico a partir de um arquivo de backup">
+                ⬆️ Restaurar
+              </button>
+              <input type="file" id="import-backup-input" accept="application/json,.json" style="display: none" />
+              <button type="button" class="btn-refresh-history" id="refresh-history-btn" title="Atualizar lista">
+                🔄
+              </button>
+            </div>
           </div>
+
+          <p class="history-hint">
+            💾 Seu histórico fica salvo neste navegador e é sincronizado automaticamente com o servidor.
+            Assim, mesmo que o servidor gratuito reinicie, nada se perde.
+          </p>
 
           <!-- History Filters -->
           <div class="history-filters">
