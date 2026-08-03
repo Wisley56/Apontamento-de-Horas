@@ -2152,6 +2152,27 @@ tr.status-ignored {
   white-space: nowrap;
 }
 
+.btn-clear-history {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn-clear-history:hover {
+  background: var(--status-divergent-bg);
+  border-color: var(--status-divergent);
+  color: var(--status-divergent);
+  transform: translateY(-1px);
+}
+
 .btn-backup:hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
