@@ -68,6 +68,7 @@ const elements = {
   historySection: document.getElementById("history-section"),
   historyList: document.getElementById("history-list"),
   refreshHistoryBtn: document.getElementById("refresh-history-btn"),
+  clearHistoryBtn: document.getElementById("clear-history-btn"),
   filterColaborador: document.getElementById("filter-colaborador"),
   filterMes: document.getElementById("filter-mes"),
   filterHistoryBtn: document.getElementById("filter-history-btn"),
@@ -181,6 +182,28 @@ function clearDeletedUuid(uuid) {
   try {
     localStorage.setItem(LS_DELETED_KEY, JSON.stringify(getDeletedUuids().filter((u) => u !== uuid)));
   } catch { /* ignore */ }
+}
+
+function clearLocalHistory() {
+  try {
+    localStorage.removeItem(LS_HISTORY_KEY);
+  } catch (e) {
+    console.warn("Não foi possível limpar o histórico do navegador:", e);
+  }
+}
+
+/**
+ * Assinatura de conteúdo de um registro. Usada para reconhecer no servidor
+ * registros salvos por uma versão que ainda não devolve o uuid — sem isso o
+ * navegador reenviava o mesmo apontamento a cada carga do histórico.
+ */
+function recordFingerprint(rec) {
+  return [
+    (rec.colaborador || "").trim().toLowerCase(),
+    rec.periodo_inicio || "",
+    rec.periodo_fim || "",
+    rec.criado_em || "",
+  ].join("|");
 }
 
 function parseCreatedAt(str) {
@@ -322,6 +345,9 @@ function setupEventListeners() {
   }
   if (elements.refreshHistoryBtn) {
     elements.refreshHistoryBtn.addEventListener("click", () => loadHistory());
+  }
+  if (elements.clearHistoryBtn) {
+    elements.clearHistoryBtn.addEventListener("click", clearAllHistory);
   }
 
   // Filtro em tempo real ao digitar colaborador (com debounce)
@@ -1424,47 +1450,68 @@ async function saveToHistory() {
 
 // ============ Histórico ============
 
+// Impede que cargas simultâneas do histórico se empilhem (cada uma disparava
+// uma sincronização, o que podia gerar registros duplicados no servidor).
+let historyLoading = false;
+
 async function loadHistory() {
-  const colaborador = elements.filterColaborador?.value?.trim() || "";
-  const mes = elements.filterMes?.value || "";
+  if (historyLoading) return;
+  historyLoading = true;
 
-  const localRecords = getLocalHistory();
-
-  // Buscar do servidor (best-effort — o histórico local funciona offline)
-  let serverRecords = [];
-  let serverOk = false;
   try {
-    const response = await apiCall("/api/historico");
-    const data = await response.json();
-    serverRecords = data.registros || [];
-    serverOk = true;
-  } catch (error) {
-    console.warn("Servidor indisponível — exibindo histórico local:", error);
+    const colaborador = elements.filterColaborador?.value?.trim() || "";
+    const mes = elements.filterMes?.value || "";
+    const applyFilters = (records) =>
+      records.filter((rec) => matchesHistoryFilters(rec, colaborador, mes));
+
+    const render = (localRecords, serverRecords, serverOk) => {
+      const filtered = applyFilters(mergeHistory(localRecords, serverRecords));
+      state.historyRecords = filtered;
+      renderHistoryCards(filtered, serverOk);
+    };
+
+    // Buscar do servidor (best-effort — o histórico local funciona offline)
+    let serverRecords = [];
+    let serverOk = false;
+    try {
+      const response = await apiCall("/api/historico");
+      const data = await response.json();
+      serverRecords = data.registros || [];
+      serverOk = true;
+    } catch (error) {
+      console.warn("Servidor indisponível — exibindo histórico local:", error);
+    }
+
+    render(getLocalHistory(), serverRecords, serverOk);
+
+    elements.historySection.style.display = "block";
+    // Ocultar botão flutuante quando o histórico está visível
+    const floatBtn = document.getElementById("float-history-btn");
+    if (floatBtn) floatBtn.style.display = "none";
+
+    // Reenviar registros locais que o servidor perdeu.
+    // Re-renderiza a partir do estado local — NUNCA chama loadHistory() de novo
+    // (a recursão criava um novo registro no servidor a cada volta).
+    if (serverOk) {
+      const resynced = await syncLocalToServer(getLocalHistory(), serverRecords);
+      if (resynced > 0) render(getLocalHistory(), serverRecords, true);
+    }
+  } finally {
+    historyLoading = false;
   }
-
-  // Reenviar registros locais que o servidor perdeu (em segundo plano)
-  if (serverOk) syncLocalToServer(localRecords, serverRecords);
-
-  const merged = mergeHistory(localRecords, serverRecords);
-  const filtered = merged.filter((rec) => matchesHistoryFilters(rec, colaborador, mes));
-
-  state.historyRecords = filtered;
-  renderHistoryCards(filtered, serverOk);
-  elements.historySection.style.display = "block";
-  // Ocultar botão flutuante quando o histórico está visível
-  const floatBtn = document.getElementById("float-history-btn");
-  if (floatBtn) floatBtn.style.display = "none";
 }
 
 function mergeHistory(localRecords, serverRecords) {
   const merged = localRecords.map((r) => ({ ...r }));
   const byUuid = new Map(merged.map((r) => [r.uuid, r]));
+  const byFingerprint = new Map(merged.map((r) => [recordFingerprint(r), r]));
   const deleted = new Set(getDeletedUuids());
 
   for (const s of serverRecords) {
     if (s.uuid && deleted.has(s.uuid)) continue; // excluído aqui, pendente no servidor
-    if (s.uuid && byUuid.has(s.uuid)) {
-      const local = byUuid.get(s.uuid);
+    // Casar por uuid ou, se o servidor não o devolver, pelo conteúdo
+    const local = (s.uuid && byUuid.get(s.uuid)) || byFingerprint.get(recordFingerprint(s));
+    if (local) {
       local.synced = true;
       local.server_id = s.id;
     } else {
@@ -1501,64 +1548,87 @@ function matchesHistoryFilters(rec, colaborador, mes) {
   return true;
 }
 
+// Guardas contra reenvio em loop: uma sincronização por vez e, no máximo, uma
+// tentativa de envio por registro em cada sessão. Se o servidor não reconhecer
+// o registro (ex.: versão antiga que não devolve o uuid), o pior caso passa a
+// ser uma tentativa inútil — e não uma cadeia infinita de novos registros.
+let syncRunning = false;
+const syncAttempted = new Set();
+
 /**
  * Reenvia ao servidor os registros que existem apenas no navegador.
  * É assim que o histórico "renasce" depois que o Render free tier reinicia.
+ * Retorna quantos registros foram reenviados.
  */
 async function syncLocalToServer(localRecords, serverRecords) {
+  if (syncRunning) return 0;
+  syncRunning = true;
+
   const serverUuids = new Set(serverRecords.map((r) => r.uuid).filter(Boolean));
+  const serverFingerprints = new Set(serverRecords.map(recordFingerprint));
   let resynced = 0;
 
-  // Concluir exclusões pendentes no servidor
-  for (const deletedUuid of getDeletedUuids()) {
-    const serverRec = serverRecords.find((r) => r.uuid === deletedUuid);
-    if (!serverRec) {
-      clearDeletedUuid(deletedUuid); // já não existe no servidor
-      continue;
-    }
-    try {
-      await apiCall(`/api/historico/${serverRec.id}`, "DELETE");
-      clearDeletedUuid(deletedUuid);
-    } catch {
-      break; // servidor fora — tenta na próxima
-    }
-  }
-
-  for (const rec of localRecords) {
-    if (serverUuids.has(rec.uuid)) {
-      if (!rec.synced) {
-        rec.synced = true;
-        upsertLocalRecord(rec);
+  try {
+    // Concluir exclusões pendentes no servidor
+    for (const deletedUuid of getDeletedUuids()) {
+      const serverRec = serverRecords.find((r) => r.uuid === deletedUuid);
+      if (!serverRec) {
+        clearDeletedUuid(deletedUuid); // já não existe no servidor
+        continue;
       }
-      continue;
+      try {
+        await apiCall(`/api/historico/${serverRec.id}`, "DELETE");
+        clearDeletedUuid(deletedUuid);
+      } catch {
+        break; // servidor fora — tenta na próxima
+      }
     }
-    if (!rec.dias) continue; // sem detalhes não há o que reenviar
 
-    try {
-      const response = await apiCall("/api/salvar-apontamento", "POST", {
-        uuid: rec.uuid,
-        colaborador: rec.colaborador,
-        periodo_inicio: rec.periodo_inicio,
-        periodo_fim: rec.periodo_fim,
-        total_horas: rec.total_horas || 0,
-        criado_em: rec.criado_em,
-        dias: rec.dias,
-      });
-      const data = await response.json();
-      rec.synced = true;
-      rec.server_id = data.id;
-      upsertLocalRecord(rec);
-      resynced++;
-    } catch (error) {
-      console.warn("Falha ao re-sincronizar registro:", rec.uuid, error);
-      break; // servidor provavelmente fora — tenta de novo na próxima carga
+    for (const rec of localRecords) {
+      const alreadyOnServer =
+        serverUuids.has(rec.uuid) || serverFingerprints.has(recordFingerprint(rec));
+
+      if (alreadyOnServer) {
+        if (!rec.synced) {
+          rec.synced = true;
+          upsertLocalRecord(rec);
+        }
+        continue;
+      }
+      if (!rec.dias) continue;   // sem detalhes não há o que reenviar
+      if (!rec.uuid) continue;   // sem uuid o servidor não consegue evitar duplicata
+      if (syncAttempted.has(rec.uuid)) continue; // já tentado nesta sessão
+
+      syncAttempted.add(rec.uuid);
+      try {
+        const response = await apiCall("/api/salvar-apontamento", "POST", {
+          uuid: rec.uuid,
+          colaborador: rec.colaborador,
+          periodo_inicio: rec.periodo_inicio,
+          periodo_fim: rec.periodo_fim,
+          total_horas: rec.total_horas || 0,
+          criado_em: rec.criado_em,
+          dias: rec.dias,
+        });
+        const data = await response.json();
+        rec.synced = true;
+        rec.server_id = data.id;
+        upsertLocalRecord(rec);
+        resynced++;
+      } catch (error) {
+        console.warn("Falha ao re-sincronizar registro:", rec.uuid, error);
+        syncAttempted.delete(rec.uuid); // falha de rede pode ser tentada de novo
+        break; // servidor provavelmente fora — tenta de novo na próxima carga
+      }
     }
+  } finally {
+    syncRunning = false;
   }
 
   if (resynced > 0) {
     console.info(`[Sync] ${resynced} registro(s) re-sincronizado(s) com o servidor.`);
-    loadHistory(); // atualiza os badges de sincronização
   }
+  return resynced;
 }
 
 function renderHistoryCards(records, serverOk = true) {
@@ -1652,6 +1722,70 @@ async function deleteHistoryRecord(uuid) {
 }
 
 window.deleteHistoryRecord = deleteHistoryRecord;
+
+/**
+ * Apaga TODOS os registros do histórico — no navegador e no servidor.
+ * Registros que não puderam ser removidos do servidor ficam marcados como
+ * excluídos (lápides) e serão apagados na próxima sincronização.
+ */
+async function clearAllHistory() {
+  const total = (state.historyRecords || []).length;
+  const localTotal = getLocalHistory().length;
+
+  if (total === 0 && localTotal === 0) {
+    showToast("O histórico já está vazio.", "info");
+    return;
+  }
+
+  const msg =
+    `Apagar TODO o histórico (${Math.max(total, localTotal)} registro(s))?\n\n` +
+    `Esta ação remove os registros deste navegador e do servidor e NÃO pode ser desfeita.\n` +
+    `Dica: use "⬇️ Backup" antes, se quiser guardar uma cópia.`;
+  if (!confirm(msg)) return;
+
+  // Lápides antes de limpar o local, para que nada "ressuscite" na sincronização
+  for (const rec of state.historyRecords || []) {
+    if (rec.uuid) addDeletedUuid(rec.uuid);
+  }
+
+  const serverIds = (state.historyRecords || [])
+    .map((r) => r.server_id)
+    .filter((id) => id != null);
+
+  clearLocalHistory();
+  state.historyRecords = [];
+  syncAttempted.clear();
+  renderHistoryCards([], true);
+
+  showLoading(true);
+  let serverCleared = false;
+  try {
+    await apiCall("/api/historico", "DELETE");
+    serverCleared = true;
+  } catch (error) {
+    console.warn("Limpeza em lote indisponível, removendo registro por registro:", error);
+    // Fallback: apagar um a um (servidor sem o endpoint de limpeza total)
+    try {
+      for (const id of serverIds) {
+        await apiCall(`/api/historico/${id}`, "DELETE");
+      }
+      serverCleared = true;
+    } catch (err) {
+      console.warn("Servidor indisponível — exclusões pendentes serão repetidas:", err);
+    }
+  } finally {
+    showLoading(false);
+  }
+
+  if (serverCleared) {
+    try { localStorage.removeItem(LS_DELETED_KEY); } catch { /* ignore */ }
+    showToast("🗑️ Histórico apagado por completo!", "success");
+  } else {
+    showToast("🗑️ Histórico apagado neste navegador. O servidor será limpo na próxima sincronização.", "success");
+  }
+
+  await loadHistory();
+}
 
 // ============ Detalhe do Histórico ============
 
