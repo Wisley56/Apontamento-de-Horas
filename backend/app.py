@@ -77,6 +77,20 @@ def init_db():
             conn.execute("ALTER TABLE apontamentos ADD COLUMN uuid TEXT")
         except sqlite3.OperationalError:
             pass
+
+        # Remover duplicatas de uuid herdadas de sincronizações antigas,
+        # mantendo apenas o registro mais recente de cada uuid.
+        conn.execute("""
+            DELETE FROM apontamentos
+            WHERE uuid IS NOT NULL
+              AND id NOT IN (SELECT MAX(id) FROM apontamentos WHERE uuid IS NOT NULL GROUP BY uuid)
+        """)
+
+        # Garantia definitiva de idempotência: o mesmo uuid nunca entra duas vezes
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_apontamentos_uuid
+            ON apontamentos(uuid) WHERE uuid IS NOT NULL
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -478,23 +492,40 @@ async def salvar_apontamento(request: SaveRequest):
                         "ja_existia": True,
                     }
 
-            cursor = conn.execute(
-                """
-                INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json, uuid)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    request.colaborador.strip(),
-                    request.periodo_inicio,
-                    request.periodo_fim,
-                    request.total_horas,
-                    criado_em,
-                    dados_json,
-                    request.uuid,
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json, uuid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request.colaborador.strip(),
+                        request.periodo_inicio,
+                        request.periodo_fim,
+                        request.total_horas,
+                        criado_em,
+                        dados_json,
+                        request.uuid,
+                    )
                 )
-            )
-            conn.commit()
-            record_id = cursor.lastrowid
+                conn.commit()
+                record_id = cursor.lastrowid
+            except sqlite3.IntegrityError:
+                # Índice único de uuid: dois envios simultâneos do mesmo registro
+                conn.rollback()
+                existing = conn.execute(
+                    "SELECT id, criado_em FROM apontamentos WHERE uuid = ?",
+                    (request.uuid,)
+                ).fetchone()
+                if not existing:
+                    raise
+                return {
+                    "id": existing["id"],
+                    "mensagem": "Apontamento já sincronizado.",
+                    "colaborador": request.colaborador,
+                    "criado_em": existing["criado_em"],
+                    "ja_existia": True,
+                }
         finally:
             conn.close()
 
@@ -539,7 +570,9 @@ async def get_historico(
                 except ValueError:
                     pass  # ignorar filtro de mês inválido
 
-            query += " ORDER BY id DESC LIMIT 100"
+            # Limite alto: registros fora da janela pareciam "perdidos" para o
+            # frontend, que os reenviava e criava duplicatas.
+            query += " ORDER BY id DESC LIMIT 1000"
             rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
@@ -560,6 +593,35 @@ async def get_historico(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao buscar histórico: {str(e)}")
+
+
+@app.delete("/api/historico")
+async def clear_historico(
+    colaborador: Optional[str] = Query(None, description="Limitar a limpeza a um colaborador")
+):
+    """
+    Apaga todos os apontamentos do histórico de uma vez.
+    Se 'colaborador' for informado, apaga apenas os registros desse colaborador.
+    """
+    try:
+        conn = get_db()
+        try:
+            if colaborador and colaborador.strip():
+                result = conn.execute(
+                    "DELETE FROM apontamentos WHERE LOWER(colaborador) = LOWER(?)",
+                    (colaborador.strip(),)
+                )
+            else:
+                result = conn.execute("DELETE FROM apontamentos")
+            conn.commit()
+            deleted = result.rowcount
+        finally:
+            conn.close()
+
+        return {"mensagem": "Histórico limpo com sucesso", "removidos": deleted}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao limpar histórico: {str(e)}")
 
 
 @app.get("/api/historico/{record_id}")
