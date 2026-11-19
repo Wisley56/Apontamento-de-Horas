@@ -1,686 +1,305 @@
 """
-API Backend - Sistema de Apontamento de Horas
-FastAPI server com endpoints para análise, exportação e persistência de histórico.
+API Backend - Apontamento de Horas
+FastAPI: feriados, exportação Excel e proxy para a API do Businessmap.
+
+O navegador não chama o Businessmap diretamente (CORS). As chamadas passam por
+aqui com a API Key do próprio usuário no header `X-Businessmap-Key`. A chave
+não é gravada nem registrada em log.
 """
 
-from fastapi import FastAPI, HTTPException, Response, Query
+import io
+import os
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
+
+import openpyxl
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List, Dict, Optional
-from datetime import datetime, date
-import os
-import io
-import sqlite3
-import json
-from pathlib import Path
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from pydantic import BaseModel, Field
 
-from services.hours_service import process_day, time_to_decimal
-from services.holidays_service import (
-    get_holidays_for_period, 
-    classify_date, 
-    generate_date_range,
-    get_states_list
-)
-
-# Importação para exportação Excel
-import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from services.businessmap_client import BusinessmapClient, BusinessmapError
+from services.holidays_service import get_holidays_for_period, get_states_list
 
 app = FastAPI(
-    title="Sistema de Apontamento de Horas",
-    description="API para controle e análise de apontamento de horas trabalhadas",
-    version="2.0.0"
+    title="Apontamento de Horas",
+    description="Cálculo de horas trabalhadas e lançamento no Businessmap",
+    version="3.0.0",
 )
 
-# CORS para permitir requisições do frontend
+# CORS: por padrão aceita qualquer origem (não há cookies nem credenciais de sessão;
+# cada requisição carrega a chave do próprio usuário). Para restringir, defina
+# ALLOWED_ORIGINS="https://seu-app.vercel.app,http://localhost:8000".
+_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Businessmap-Key"],
 )
 
-# ============ BANCO DE DADOS ============
 
-# O arquivo .db fica na mesma pasta do backend
-DB_PATH = Path(__file__).parent / "apontamentos.db"
+# ============ Utilitários ============
 
-
-def get_db():
-    """Retorna uma conexão com o banco SQLite."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    """Inicializa o banco de dados criando a tabela se não existir."""
-    conn = get_db()
+def bm_client(api_key: Optional[str]) -> BusinessmapClient:
     try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS apontamentos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                colaborador TEXT NOT NULL,
-                periodo_inicio TEXT NOT NULL,
-                periodo_fim TEXT NOT NULL,
-                total_horas REAL DEFAULT 0,
-                criado_em TEXT NOT NULL,
-                dados_json TEXT NOT NULL,
-                uuid TEXT
-            )
-        """)
-        # Migração para bancos criados antes da coluna uuid
-        try:
-            conn.execute("ALTER TABLE apontamentos ADD COLUMN uuid TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        # Remover duplicatas de uuid herdadas de sincronizações antigas,
-        # mantendo apenas o registro mais recente de cada uuid.
-        conn.execute("""
-            DELETE FROM apontamentos
-            WHERE uuid IS NOT NULL
-              AND id NOT IN (SELECT MAX(id) FROM apontamentos WHERE uuid IS NOT NULL GROUP BY uuid)
-        """)
-
-        # Garantia definitiva de idempotência: o mesmo uuid nunca entra duas vezes
-        conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_apontamentos_uuid
-            ON apontamentos(uuid) WHERE uuid IS NOT NULL
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+        return BusinessmapClient(api_key or "")
+    except BusinessmapError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
+async def bm_call(api_key: Optional[str], fn):
+    """Executa uma operação no Businessmap convertendo erros para HTTPException."""
+    client = bm_client(api_key)
+    try:
+        async with client:
+            return await fn(client)
+    except BusinessmapError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
-# ============ MODELOS ============
-
-class DateRange(BaseModel):
-    start_date: str  # dd/mm/yyyy
-    end_date: str    # dd/mm/yyyy
-
-
-class ManualException(BaseModel):
-    date: str        # dd/mm/yyyy
-    type: str        # ferias, afastamento, atestado, banco, feriado_manual
-
-
-class AnalyzeRequest(BaseModel):
-    selection_type: str  # "period" ou "single"
-    start_date: str      # dd/mm/yyyy
-    end_date: Optional[str] = None  # dd/mm/yyyy (opcional se single)
-    state: str           # UF
-    worked_hours: List[str]  # Lista de HH:MM para cada dia
-    manual_exceptions: Optional[List[ManualException]] = []
-
-
-class DayResult(BaseModel):
-    date: str
-    day_of_week: str
-    worked_time: str
-    redmine_value: str
-    difference: str
-    status: str
-    status_icon: str
-    status_description: str
-    css_class: str
-    is_ignored: bool
-    day_type: Optional[str]
-    manual_status: Optional[str]
-
-
-class AnalyzeResponse(BaseModel):
-    days: List[DayResult]
-    summary: Dict
-
-
-class ExportRequest(BaseModel):
-    days: List[Dict]
-
-
-class IntervalDetail(BaseModel):
-    entry: str = ""
-    exit: str = ""
-
-
-class DayDetail(BaseModel):
-    date: str           # dd/mm/yyyy
-    day_name: str
-    intervals: List[IntervalDetail]
-    total_hours: float = 0.0
-    overtime: Optional[str] = "00:00"
-    absence: Optional[str] = "00:00"
-    activity_type: Optional[str] = ""   # Melhoria, Correção ou Suporte
-    is_ignored: bool = False
-    ignore_reason: str = ""
-
-
-class SaveRequest(BaseModel):
-    colaborador: str
-    periodo_inicio: str   # dd/mm/yyyy
-    periodo_fim: str      # dd/mm/yyyy
-    total_horas: float = 0.0
-    dias: List[DayDetail]
-    uuid: Optional[str] = None       # id gerado no frontend para sincronização idempotente
-    criado_em: Optional[str] = None  # preservado no re-envio de registros locais
-
-
-# ============ ENDPOINTS ============
+# ============ Básico ============
 
 @app.get("/api/health")
 async def health_check():
-    """Endpoint para manter a aplicação ativa (anti-sleep)"""
+    """Usado pelo frontend para manter o servidor gratuito acordado."""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-# NOTA: A raiz "/" é servida automaticamente pelo StaticFiles(html=True) no final do arquivo
 
 
 @app.get("/api/states")
 async def list_states():
-    """Lista todos os estados brasileiros"""
     return get_states_list()
 
 
 @app.get("/api/holidays/{year}/{state}")
 async def list_holidays(year: int, state: str):
-    """Lista feriados de um ano para um estado"""
-    try:
-        start = date(year, 1, 1)
-        end = date(year, 12, 31)
-        holidays_dict = get_holidays_for_period(start, end, state)
-        return {"holidays": holidays_dict}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if year < 1900 or year > 2200:
+        raise HTTPException(status_code=400, detail="Ano inválido")
+    return {"holidays": get_holidays_for_period(date(year, 1, 1), date(year, 12, 31), state)}
 
 
-@app.post("/api/analyze")
-async def analyze_hours(request: AnalyzeRequest):
+# ============ Businessmap ============
+
+@app.get("/api/bm/me")
+async def bm_me(x_businessmap_key: Optional[str] = Header(None)):
+    return await bm_call(x_businessmap_key, lambda c: c.me())
+
+
+@app.get("/api/bm/boards")
+async def bm_boards(x_businessmap_key: Optional[str] = Header(None)):
+    return {"boards": await bm_call(x_businessmap_key, lambda c: c.boards())}
+
+
+@app.get("/api/bm/cards")
+async def bm_cards(
+    scope: str = Query("mine", pattern="^(mine|board)$"),
+    user_id: Optional[int] = Query(None),
+    board_id: Optional[int] = Query(None),
+    x_businessmap_key: Optional[str] = Header(None),
+):
+    if scope == "mine" and not user_id:
+        raise HTTPException(status_code=400, detail="user_id é obrigatório para 'Meus cards'.")
+    if scope == "board" and not board_id:
+        raise HTTPException(status_code=400, detail="Selecione um quadro.")
+    owner = user_id if scope == "mine" else None
+    cards = await bm_call(x_businessmap_key, lambda c: c.cards(owner_user_id=owner, board_id=board_id))
+    return {"cards": cards}
+
+
+@app.get("/api/bm/cards/{card_id}/subtasks")
+async def bm_subtasks(card_id: int, x_businessmap_key: Optional[str] = Header(None)):
+    return {"subtasks": await bm_call(x_businessmap_key, lambda c: c.subtasks(card_id))}
+
+
+@app.get("/api/bm/boards/{board_id}/categories")
+async def bm_categories(board_id: int, x_businessmap_key: Optional[str] = Header(None)):
+    return {"categories": await bm_call(x_businessmap_key, lambda c: c.board_categories(board_id))}
+
+
+@app.get("/api/bm/logged-time")
+async def bm_logged_time(
+    user_id: int = Query(...),
+    from_date: str = Query(..., alias="from"),
+    to_date: str = Query(..., alias="to"),
+    x_businessmap_key: Optional[str] = Header(None),
+):
+    for value in (from_date, to_date):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Data inválida: {value}")
+    entries = await bm_call(x_businessmap_key, lambda c: c.logged_time(user_id, from_date, to_date))
+    return {"entries": entries}
+
+
+class LoggedTimeItem(BaseModel):
+    card_id: int
+    subtask_id: Optional[int] = None
+    category_id: Optional[int] = None
+    date: str            # YYYY-MM-DD
+    minutes: int
+    comment: Optional[str] = ""
+
+
+class LoggedTimeBatch(BaseModel):
+    user_id: Optional[int] = None
+    items: List[LoggedTimeItem] = Field(default_factory=list)
+
+
+@app.post("/api/bm/logged-time/batch")
+async def bm_create_logged_time(batch: LoggedTimeBatch, x_businessmap_key: Optional[str] = Header(None)):
     """
-    Analisa as horas trabalhadas para o período informado.
+    Cria todos os lançamentos numa única transação do Businessmap (createMany):
+    ou todos são salvos, ou nenhum é.
     """
+    items = [i.model_dump() for i in batch.items]
+    created = await bm_call(x_businessmap_key, lambda c: c.create_logged_times(items, batch.user_id))
+    return {"created": created, "count": len(created)}
+
+
+# ============ Conferência ============
+
+def _check_period(from_date: str, to_date: str):
     try:
-        # Parse das datas
-        start_date = datetime.strptime(request.start_date, "%d/%m/%Y").date()
-        
-        if request.selection_type == "single":
-            end_date = start_date
-        else:
-            end_date = datetime.strptime(request.end_date, "%d/%m/%Y").date()
-        
-        if end_date < start_date:
-            raise HTTPException(status_code=400, detail="Data final não pode ser menor que a inicial")
-        
-        # Gerar lista de datas
-        dates = generate_date_range(start_date, end_date)
-        
-        # Verificar quantidade de horas informadas
-        if len(request.worked_hours) != len(dates):
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Esperado {len(dates)} valores de horas, recebido {len(request.worked_hours)}"
-            )
-        
-        # Buscar feriados
-        holidays_dict = get_holidays_for_period(start_date, end_date, request.state)
-        
-        # Converter exceções manuais para dict
-        manual_exceptions = {}
-        if request.manual_exceptions:
-            type_names = {
-                "ferias": "Férias",
-                "afastamento": "Afastamento",
-                "atestado": "Atestado",
-                "banco": "Banco de Horas",
-                "feriado_manual": "Feriado Manual"
-            }
-            for exc in request.manual_exceptions:
-                manual_exceptions[exc.date] = type_names.get(exc.type, exc.type)
-        
-        # Processar cada dia
-        results = []
-        stats = {
-            "total_days": len(dates),
-            "workdays_analyzed": 0,
-            "days_ok": 0,
-            "days_divergent": 0,
-            "days_ignored": 0,
-            "total_worked_hours": 0.0,
-            "total_redmine_hours": 0.0,
-            "conformity_percentage": 0.0
-        }
-        
-        days_of_week = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
-        
-        for i, date_str in enumerate(dates):
-            date_obj = datetime.strptime(date_str, "%d/%m/%Y").date()
-            day_of_week = days_of_week[date_obj.weekday()]
-            
-            # Classificar o dia
-            classification = classify_date(date_str, holidays_dict, manual_exceptions)
-            
-            if classification["is_workday"]:
-                # Dia útil - processar
-                worked_time = request.worked_hours[i]
-                day_result = process_day(date_str, worked_time)
-                
-                stats["workdays_analyzed"] += 1
-                
-                if day_result["status"] == "confere":
-                    stats["days_ok"] += 1
-                else:
-                    stats["days_divergent"] += 1
-                
-                # Somar horas
-                decimal_hours = time_to_decimal(worked_time)
-                stats["total_worked_hours"] += decimal_hours
-                stats["total_redmine_hours"] += decimal_hours
-                
-            else:
-                # Dia ignorado
-                day_result = process_day(date_str, "----", classification["description"])
-                stats["days_ignored"] += 1
-            
-            day_result["day_of_week"] = day_of_week
-            results.append(day_result)
-        
-        # Calcular percentual de conformidade
-        if stats["workdays_analyzed"] > 0:
-            stats["conformity_percentage"] = round(
-                (stats["days_ok"] / stats["workdays_analyzed"]) * 100, 2
-            )
-        
-        # Formatar totais
-        stats["total_worked_display"] = f"{stats['total_worked_hours']:.2f}h"
-        stats["total_redmine_display"] = f"{stats['total_redmine_hours']:.2f}h"
-        
-        return {
-            "days": results,
-            "summary": stats
-        }
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao processar datas: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        a, b = date.fromisoformat(from_date), date.fromisoformat(to_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datas inválidas (use AAAA-MM-DD).")
+    if b < a:
+        raise HTTPException(status_code=400, detail="A data final deve ser igual ou posterior à inicial.")
+    if (b - a).days > 366:
+        raise HTTPException(status_code=400, detail="Escolha um período de até 1 ano.")
+
+
+@app.get("/api/bm/conference")
+async def bm_conference(
+    user_id: int = Query(...),
+    from_date: str = Query(..., alias="from"),
+    to_date: str = Query(..., alias="to"),
+    x_businessmap_key: Optional[str] = Header(None),
+):
+    """Lançamentos do usuário no período com card, quadro, subtarefa e categoria."""
+    _check_period(from_date, to_date)
+    return await bm_call(x_businessmap_key, lambda c: c.conference(user_id, from_date, to_date))
+
+
+class LoggedTimeUpdate(BaseModel):
+    minutes: Optional[int] = None
+    comment: Optional[str] = None
+    date: Optional[str] = None          # YYYY-MM-DD
+    category_id: Optional[int] = None   # a API não aceita remover a categoria via PATCH
+
+
+@app.patch("/api/bm/logged-time/{logged_time_id}")
+async def bm_update_logged_time(logged_time_id: int, body: LoggedTimeUpdate, x_businessmap_key: Optional[str] = Header(None)):
+    """Edita tempo, comentário, data e/ou categoria de um lançamento."""
+    return await bm_call(
+        x_businessmap_key,
+        lambda c: c.update_logged_time(
+            logged_time_id, minutes=body.minutes, comment=body.comment, date=body.date, category_id=body.category_id
+        ),
+    )
+
+
+@app.delete("/api/bm/logged-time/{logged_time_id}")
+async def bm_delete_logged_time(logged_time_id: int, x_businessmap_key: Optional[str] = Header(None)):
+    async def go(c):
+        await c.delete_logged_time(logged_time_id)
+        return {"deleted": True, "logged_time_id": logged_time_id}
+
+    return await bm_call(x_businessmap_key, go)
+
+
+class LoggedTimeRecreate(LoggedTimeItem):
+    user_id: Optional[int] = None
+
+
+@app.post("/api/bm/logged-time/{logged_time_id}/recreate")
+async def bm_recreate_logged_time(logged_time_id: int, body: LoggedTimeRecreate, x_businessmap_key: Optional[str] = Header(None)):
+    """
+    Para o que o PATCH não cobre (ex.: remover a categoria) ou quando o Businessmap
+    recusa a edição: cria um novo lançamento com os dados ajustados e exclui o antigo
+    (nessa ordem).
+    """
+    item = body.model_dump()
+    user_id = item.pop("user_id", None)
+    return await bm_call(x_businessmap_key, lambda c: c.recreate_logged_time(logged_time_id, item, user_id))
+
+
+# ============ Exportação Excel ============
+
+class ExportDay(BaseModel):
+    date: str = ""
+    day_of_week: str = ""
+    punches: str = ""
+    total_hhmm: str = ""
+    total_decimal: str = ""
+    tipo: str = ""
+    cards: str = ""
+    status: str = ""
+    ignored: bool = False
+
+
+class ExportRequest(BaseModel):
+    days: List[ExportDay]
+    summary: Optional[Dict[str, Any]] = None
 
 
 @app.post("/api/export")
 async def export_to_excel(request: ExportRequest):
-    """
-    Exporta os dados para arquivo Excel.
-    """
-    try:
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Apontamento de Horas"
-        
-        # Estilos
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center")
-        
-        ok_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-        divergent_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        ignored_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-        
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        # Cabeçalhos (removido "Diferença")
-        headers = ["Data", "Dia", "Tempo Trabalhado", "Valor Redmine", "Tipo", "Status"]
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-            cell.border = thin_border
-        
-        # Dados
-        for row_idx, day in enumerate(request.days, 2):
-            ws.cell(row=row_idx, column=1, value=day.get("date", "")).border = thin_border
-            ws.cell(row=row_idx, column=2, value=day.get("day_of_week", "")).border = thin_border
-            ws.cell(row=row_idx, column=3, value=day.get("worked_time", "")).border = thin_border
-            ws.cell(row=row_idx, column=4, value=day.get("redmine_value", "")).border = thin_border
-            ws.cell(row=row_idx, column=5, value=day.get("day_type", "")).border = thin_border
-            
-            status_cell = ws.cell(row=row_idx, column=6, value=day.get("status_description", ""))
-            status_cell.border = thin_border
-            
-            # Aplicar cor baseada no status
-            status = day.get("status", "")
-            if status == "ok":
-                for col in range(1, 7):
-                    ws.cell(row=row_idx, column=col).fill = ok_fill
-            elif status == "divergent":
-                for col in range(1, 7):
-                    ws.cell(row=row_idx, column=col).fill = divergent_fill
-            elif status == "ignorado":
-                for col in range(1, 7):
-                    ws.cell(row=row_idx, column=col).fill = ignored_fill
-        
-        # Ajustar largura das colunas
-        column_widths = [12, 12, 18, 15, 20, 18]
-        for col, width in enumerate(column_widths, 1):
-            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
-        
-        # Salvar em bytes
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        
-        return Response(
-            content=output.getvalue(),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={
-                "Content-Disposition": "attachment; filename=apontamento_resultado.xlsx"
-            }
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Apontamento de Horas"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1F3A5F", end_color="1F3A5F", fill_type="solid")
+    ignored_fill = PatternFill(start_color="EEF1F5", end_color="EEF1F5", fill_type="solid")
+    done_fill = PatternFill(start_color="E3F4E8", end_color="E3F4E8", fill_type="solid")
+    thin = Side(style="thin", color="C9D1DC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    headers = ["Data", "Dia", "Marcações", "Total (HH:MM)", "Horas decimais", "Tipo", "Card(s)", "Status"]
+    for col, title in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=title)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    for row, day in enumerate(request.days, 2):
+        values = [day.date, day.day_of_week, day.punches, day.total_hhmm, day.total_decimal,
+                  day.tipo, day.cards, day.status]
+        fill = ignored_fill if day.ignored else (done_fill if day.status.lower().startswith("lan") else None)
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=col in (3, 7))
+            if fill:
+                cell.fill = fill
+
+    if request.summary:
+        row = len(request.days) + 3
+        ws.cell(row=row, column=3, value="Total do período").font = Font(bold=True)
+        ws.cell(row=row, column=4, value=request.summary.get("total_hhmm", "")).font = Font(bold=True)
+        ws.cell(row=row, column=5, value=request.summary.get("total_decimal", "")).font = Font(bold=True)
+
+    for col, width in enumerate([12, 10, 34, 14, 14, 14, 40, 14], 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+    ws.freeze_panes = "A2"
+
+    output = io.BytesIO()
+    wb.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=apontamento_horas.xlsx"},
+    )
 
 
-# ============ ENDPOINTS DE HISTÓRICO ============
-
-@app.get("/api/verificar-duplicata")
-async def verificar_duplicata(
-    colaborador: str = Query(..., description="Nome do colaborador"),
-    periodo_inicio: str = Query(..., description="Data início dd/mm/yyyy"),
-    periodo_fim: str = Query(..., description="Data fim dd/mm/yyyy"),
-):
-    """
-    Verifica se já existe um apontamento para o mesmo colaborador que sobreponha
-    o período informado. Retorna os registros conflitantes caso existam.
-    """
-    try:
-        conn = get_db()
-        try:
-            # Busca registros do mesmo colaborador (case-insensitive)
-            rows = conn.execute(
-                """
-                SELECT id, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em
-                FROM apontamentos
-                WHERE LOWER(colaborador) = LOWER(?)
-                ORDER BY id DESC
-                """,
-                (colaborador.strip(),)
-            ).fetchall()
-        finally:
-            conn.close()
-
-        if not rows:
-            return {"duplicata": False, "registros": []}
-
-        # Converter datas para comparação
-        def parse_date(d):
-            try:
-                return datetime.strptime(d, "%d/%m/%Y").date()
-            except Exception:
-                return None
-
-        novo_inicio = parse_date(periodo_inicio)
-        novo_fim = parse_date(periodo_fim)
-
-        if not novo_inicio or not novo_fim:
-            return {"duplicata": False, "registros": []}
-
-        conflitos = []
-        for row in rows:
-            ex_inicio = parse_date(row["periodo_inicio"])
-            ex_fim = parse_date(row["periodo_fim"])
-            if not ex_inicio or not ex_fim:
-                continue
-            # Sobreposição: não há sobreposição apenas se um termina antes do outro começar
-            if not (novo_fim < ex_inicio or novo_inicio > ex_fim):
-                conflitos.append({
-                    "id": row["id"],
-                    "colaborador": row["colaborador"],
-                    "periodo_inicio": row["periodo_inicio"],
-                    "periodo_fim": row["periodo_fim"],
-                    "total_horas": row["total_horas"],
-                    "criado_em": row["criado_em"],
-                })
-
-        return {
-            "duplicata": len(conflitos) > 0,
-            "registros": conflitos,
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao verificar duplicata: {str(e)}")
-
-
-@app.post("/api/salvar-apontamento", status_code=201)
-async def salvar_apontamento(request: SaveRequest):
-    """
-    Salva um apontamento no banco de dados SQLite.
-    Recebe: colaborador, periodo_inicio, periodo_fim, total_horas, dias (com intervalos e descrições).
-    """
-    try:
-        criado_em = request.criado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
-        dados_json = json.dumps(
-            [d.model_dump() for d in request.dias],
-            ensure_ascii=False
-        )
-
-        conn = get_db()
-        try:
-            # Sincronização idempotente: se o uuid já existe, não duplica
-            if request.uuid:
-                existing = conn.execute(
-                    "SELECT id, criado_em FROM apontamentos WHERE uuid = ?",
-                    (request.uuid,)
-                ).fetchone()
-                if existing:
-                    return {
-                        "id": existing["id"],
-                        "mensagem": "Apontamento já sincronizado.",
-                        "colaborador": request.colaborador,
-                        "criado_em": existing["criado_em"],
-                        "ja_existia": True,
-                    }
-
-            try:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO apontamentos (colaborador, periodo_inicio, periodo_fim, total_horas, criado_em, dados_json, uuid)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        request.colaborador.strip(),
-                        request.periodo_inicio,
-                        request.periodo_fim,
-                        request.total_horas,
-                        criado_em,
-                        dados_json,
-                        request.uuid,
-                    )
-                )
-                conn.commit()
-                record_id = cursor.lastrowid
-            except sqlite3.IntegrityError:
-                # Índice único de uuid: dois envios simultâneos do mesmo registro
-                conn.rollback()
-                existing = conn.execute(
-                    "SELECT id, criado_em FROM apontamentos WHERE uuid = ?",
-                    (request.uuid,)
-                ).fetchone()
-                if not existing:
-                    raise
-                return {
-                    "id": existing["id"],
-                    "mensagem": "Apontamento já sincronizado.",
-                    "colaborador": request.colaborador,
-                    "criado_em": existing["criado_em"],
-                    "ja_existia": True,
-                }
-        finally:
-            conn.close()
-
-        return {
-            "id": record_id,
-            "mensagem": "Apontamento salvo com sucesso!",
-            "colaborador": request.colaborador,
-            "criado_em": criado_em,
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao salvar apontamento: {str(e)}")
-
-
-@app.get("/api/historico")
-async def get_historico(
-    colaborador: Optional[str] = Query(None, description="Filtrar por nome do colaborador"),
-    mes: Optional[str] = Query(None, description="Filtrar por mês no formato YYYY-MM")
-):
-    """
-    Retorna o histórico de apontamentos.
-    Parâmetros opcionais: colaborador (texto), mes (YYYY-MM).
-    """
-    try:
-        conn = get_db()
-        try:
-            query = "SELECT id, uuid, colaborador, periodo_inicio, periodo_fim, total_horas, criado_em FROM apontamentos WHERE 1=1"
-            params = []
-
-            if colaborador and colaborador.strip():
-                query += " AND LOWER(colaborador) LIKE LOWER(?)"
-                params.append(f"%{colaborador.strip()}%")
-
-            if mes and mes.strip():
-                # mes no formato YYYY-MM → converter para dd/mm/yyyy parcial
-                try:
-                    year, month = mes.strip().split("-")
-                    # Usar % para casar qualquer dia (01-31, 1-9 com 2 dígitos)
-                    query += " AND (periodo_inicio LIKE ? OR periodo_fim LIKE ?)"
-                    params.append(f"%/{month}/{year}")
-                    params.append(f"%/{month}/{year}")
-                except ValueError:
-                    pass  # ignorar filtro de mês inválido
-
-            # Limite alto: registros fora da janela pareciam "perdidos" para o
-            # frontend, que os reenviava e criava duplicatas.
-            query += " ORDER BY id DESC LIMIT 1000"
-            rows = conn.execute(query, params).fetchall()
-        finally:
-            conn.close()
-
-        result = [
-            {
-                "id": row["id"],
-                "uuid": row["uuid"],
-                "colaborador": row["colaborador"],
-                "periodo_inicio": row["periodo_inicio"],
-                "periodo_fim": row["periodo_fim"],
-                "total_horas": row["total_horas"],
-                "criado_em": row["criado_em"],
-            }
-            for row in rows
-        ]
-        return {"registros": result}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao buscar histórico: {str(e)}")
-
-
-@app.delete("/api/historico")
-async def clear_historico(
-    colaborador: Optional[str] = Query(None, description="Limitar a limpeza a um colaborador")
-):
-    """
-    Apaga todos os apontamentos do histórico de uma vez.
-    Se 'colaborador' for informado, apaga apenas os registros desse colaborador.
-    """
-    try:
-        conn = get_db()
-        try:
-            if colaborador and colaborador.strip():
-                result = conn.execute(
-                    "DELETE FROM apontamentos WHERE LOWER(colaborador) = LOWER(?)",
-                    (colaborador.strip(),)
-                )
-            else:
-                result = conn.execute("DELETE FROM apontamentos")
-            conn.commit()
-            deleted = result.rowcount
-        finally:
-            conn.close()
-
-        return {"mensagem": "Histórico limpo com sucesso", "removidos": deleted}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao limpar histórico: {str(e)}")
-
-
-@app.get("/api/historico/{record_id}")
-async def get_historico_detail(record_id: int):
-    """Retorna detalhe completo de um apontamento (incluindo dias e intervalos)."""
-    try:
-        conn = get_db()
-        try:
-            row = conn.execute(
-                "SELECT * FROM apontamentos WHERE id = ?", (record_id,)
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Registro não encontrado")
-
-        return {
-            "id": row["id"],
-            "colaborador": row["colaborador"],
-            "periodo_inicio": row["periodo_inicio"],
-            "periodo_fim": row["periodo_fim"],
-            "total_horas": row["total_horas"],
-            "criado_em": row["criado_em"],
-            "dias": json.loads(row["dados_json"]),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao buscar registro: {str(e)}")
-
-
-@app.delete("/api/historico/{record_id}")
-async def delete_historico(record_id: int):
-    """Remove um apontamento do histórico pelo ID."""
-    try:
-        conn = get_db()
-        try:
-            result = conn.execute(
-                "DELETE FROM apontamentos WHERE id = ?", (record_id,)
-            )
-            conn.commit()
-            deleted = result.rowcount
-        finally:
-            conn.close()
-
-        if deleted == 0:
-            raise HTTPException(status_code=404, detail="Registro não encontrado")
-
-        return {"mensagem": "Registro excluído com sucesso", "id": record_id}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao excluir registro: {str(e)}")
-
-
-# Servir arquivos estáticos do frontend na raiz
+# Servir o frontend na raiz (uso local: python app.py → http://localhost:8000)
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
@@ -688,7 +307,5 @@ if os.path.exists(frontend_dir):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
-
-
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
