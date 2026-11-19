@@ -2,396 +2,387 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="Sistema de Apontamento de Horas - Controle suas horas trabalhadas de forma simples e visual"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="Calcule as horas trabalhadas a partir das batidas de ponto e lance no Businessmap." />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <title>Apontamento de Horas</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./css/style.css" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <!-- Configuração da API (não commitado no git) -->
+    <script>
+      // Aplica o tema salvo antes da renderização para evitar "piscar".
+      try {
+        var t = JSON.parse(localStorage.getItem("apnt_settings_v3") || "{}").theme;
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <!-- Configuração da API (gerado no deploy; não versionado) -->
     <script src="./js/config.js"></script>
+    <script type="module" src="./js/app.js"></script>
   </head>
   <body>
-    <div class="app-container">
-      <!-- Header -->
-      <header class="header">
-        <div class="header-content">
-          <div class="logo">
-            <span class="logo-icon">⏱️</span>
-            <h1>Apontamento de Horas</h1>
-          </div>
-          <p class="tagline">
-            Controle suas horas trabalhadas de forma simples
-          </p>
+    <!-- Ícones -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-paste" viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 4V3h6v1M9 10h6M9 14h6M9 18h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-6 16-3-7-7-1Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+        <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+        <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.5" fill="currentColor"/><circle cx="4.5" cy="12" r="1.5" fill="currentColor"/><circle cx="4.5" cy="18" r="1.5" fill="currentColor"/></symbol>
+        <symbol id="i-chevron-right"viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-chevron-down"viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-split" viewBox="0 0 24 24"><path d="M12 4v6m0 0-6 6v4m6-10 6 6v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+        <symbol id="i-eye"viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+      </defs>
+    </svg>
+
+    <a class="skip-link" href="#main">Ir para o conteúdo</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-mark"><svg class="icon"><use href="#i-clock"></use></svg></span>
+          <span class="brand-name">Apontamento de Horas</span>
         </div>
-      </header>
+        <nav class="view-tabs" aria-label="Seções">
+          <button type="button" class="view-tab is-active" data-view="apontar" aria-current="page">Apontar</button>
+          <button type="button" class="view-tab" data-view="conferencia">Conferir</button>
+        </nav>
+        <div class="topbar-actions">
+          <button type="button" class="btn-icon" id="theme-toggle" aria-label="Alternar tema claro/escuro" title="Alternar tema">
+            <svg class="icon icon-sun"><use href="#i-sun"></use></svg>
+            <svg class="icon icon-moon"><use href="#i-moon"></use></svg>
+          </button>
+          <button type="button" class="btn btn-ghost" id="settings-open">
+            <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
+            <svg class="icon"><use href="#i-settings"></use></svg>
+            <span class="hide-sm" id="settings-label">Configurações</span>
+          </button>
+        </div>
+      </div>
+    </header>
 
-      <!-- Main Content -->
-      <main class="main-content">
-        <!-- Form Section -->
-        <section class="form-section glass-card">
-          <h2>📅 Configuração do Período</h2>
+    <nav class="stepper" aria-label="Etapas">
+      <ol class="stepper-list">
+        <li><button type="button" class="step" data-step="1"><span class="step-num">1</span><span class="step-label">Período</span></button></li>
+        <li><button type="button" class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Horários</span></button></li>
+        <li><button type="button" class="step" data-step="3"><span class="step-num">3</span><span class="step-label">Lançamento</span></button></li>
+      </ol>
+    </nav>
 
-          <form id="hours-form">
+    <main id="main" class="container">
+      <!-- Passo 1: Período -->
+      <section class="panel" id="step-1" aria-labelledby="step-1-title">
+        <header class="panel-header">
+          <h1 id="step-1-title">Qual período você quer apurar?</h1>
+          <p class="muted">Os fins de semana e feriados da UF escolhida são identificados automaticamente.</p>
+        </header>
 
-            <!-- Identificação do Colaborador -->
-            <div class="form-group colaborador-group" id="colaborador-group">
-              <label for="colaborador-name">
-                👤 Seu Nome
-                <span class="label-optional">(opcional — obrigatório apenas para salvar no histórico)</span>
-              </label>
-              <input
-                type="text"
-                id="colaborador-name"
-                placeholder="Digite seu nome completo..."
-                autocomplete="name"
-              />
-            </div>
+        <div class="chips" role="group" aria-label="Atalhos de período">
+          <button type="button" class="chip" data-range="today">Hoje</button>
+          <button type="button" class="chip" data-range="yesterday">Ontem</button>
+          <button type="button" class="chip" data-range="week">Esta semana</button>
+          <button type="button" class="chip" data-range="month">Este mês</button>
+          <button type="button" class="chip" data-range="last-month">Mês anterior</button>
+        </div>
 
-            <!-- Selection Type Toggle -->
-            <div class="toggle-container">
-              <button
-                class="toggle-btn active"
-                data-type="period"
-                id="btn-period"
-              >
-                📆 Período
-              </button>
-              <button class="toggle-btn" data-type="single" id="btn-single">
-                📍 Dia Específico
-              </button>
-            </div>
-
-            <!-- Date Selection -->
-            <div class="date-inputs">
-              <div class="form-group" id="start-date-group">
-                <label for="start-date">Data Inicial</label>
-                <input type="date" id="start-date" required />
-              </div>
-              <div class="form-group" id="end-date-group">
-                <label for="end-date">Data Final</label>
-                <input type="date" id="end-date" required />
-              </div>
-              <div
-                class="form-group"
-                id="single-date-group"
-                style="display: none"
-              >
-                <label for="single-date">Data</label>
-                <input type="date" id="single-date" />
-              </div>
-            </div>
-
-            <!-- State Selection -->
-            <div class="form-group" id="state-select-group">
-              <label for="state-select">Estado (UF)</label>
-              <select id="state-select" required>
-                <option value="">Selecione o estado...</option>
-              </select>
-            </div>
-
-            <!-- Generate Days Button -->
-            <button
-              type="button"
-              class="btn-secondary btn-generate"
-              id="generate-days-btn"
-            >
-              <span>📋</span> Gerar Lista de Dias
-            </button>
-
-            <!-- Hours Input Section - Dynamic Days List -->
-            <div
-              class="days-list-section"
-              id="days-list-section"
-              style="display: none"
-            >
-              <div class="days-section-header">
-                <h3>⏰ Registro de Horas por Dia</h3>
-                <button type="button" class="btn-paste-hours" id="paste-hours-btn" title="Colar horários copiados do sistema da empresa (Ctrl+V)">
-                  <span>📋</span> Colar Horários
-                </button>
-              </div>
-              <div class="table-legend">
-                <span class="legend-item"><span class="legend-badge">HE</span> Horas Extras</span>
-                <span class="legend-item"><span class="legend-badge">AUS</span> Ausências</span>
-                <span class="legend-item"><span class="legend-badge alert">!</span> Divergência (Priorizado Redmine)</span>
-              </div>
-
-              <div class="days-header" id="days-header">
-                <span class="col-date">Data</span>
-                <span class="col-day">Dia</span>
-                <span class="col-time">Entrada 1</span>
-                <span class="col-time">Saída 1</span>
-                <span class="col-time">Entrada 2</span>
-                <span class="col-time">Saída 2</span>
-                <span class="col-total">Total</span>
-                <span class="col-actions"></span>
-              </div>
-
-              <div class="days-list" id="days-list">
-                <!-- Populated by JS -->
-              </div>
-            </div>
-
-            <!-- Manual Exceptions -->
-            <div
-              class="exceptions-section"
-              id="exceptions-section"
-              style="display: none"
-            >
-              <h3>📋 Exceções Manuais (opcional)</h3>
-              <p class="section-hint">
-                Adicione dias de férias, atestado, banco de horas, etc.
-              </p>
-
-              <div class="exception-input-row">
-                <input type="date" id="exception-date" placeholder="Data" />
-                <select id="exception-type">
-                  <option value="ferias">Férias</option>
-                  <option value="atestado">Atestado</option>
-                  <option value="afastamento">Afastamento</option>
-                  <option value="banco">Banco de Horas</option>
-                  <option value="feriado_manual">Feriado Manual</option>
-                </select>
-                <button type="button" id="add-exception" class="btn-secondary">
-                  + Adicionar
-                </button>
-              </div>
-
-              <ul id="exceptions-list" class="exceptions-list"></ul>
-            </div>
-
-            <!-- Submit Button -->
-            <button
-              type="submit"
-              class="btn-primary"
-              id="analyze-btn"
-              formnovalidate
-              style="display: none"
-            >
-              <span class="btn-icon">🔍</span>
-              Analisar Horas
-            </button>
-          </form>
-        </section>
-
-        <!-- Results Section -->
-        <section
-          class="results-section glass-card"
-          id="results-section"
-          style="display: none"
-        >
-          <div class="results-header">
-            <h2>📊 Resultado da Análise</h2>
-            <button class="btn-export" id="export-btn">
-              <span>📥</span> Exportar Excel
-            </button>
+        <form id="period-form" class="form-grid" novalidate>
+          <div class="field">
+            <label for="start-date">Data inicial</label>
+            <input type="date" id="start-date" required />
           </div>
-
-          <!-- Summary Cards -->
-          <div class="summary-cards" id="summary-cards">
-            <!-- Populated by JS -->
+          <div class="field">
+            <label for="end-date">Data final</label>
+            <input type="date" id="end-date" required />
           </div>
-
-          <!-- Save Confirmation -->
-          <div class="save-confirmation" id="save-confirmation">
-            <div class="save-confirmation-content">
-              <span class="save-confirmation-icon">💾</span>
-              <div class="save-confirmation-text">
-                <strong>Deseja salvar este lançamento no histórico?</strong>
-                <span>O registro ficará disponível para consulta futura.</span>
-              </div>
-              <button type="button" class="btn-save-history" id="save-history-btn">
-                Salvar Histórico
-              </button>
-            </div>
+          <div class="field">
+            <label for="uf-select">Estado (feriados)</label>
+            <select id="uf-select" required></select>
           </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-lg">Continuar</button>
+          </div>
+        </form>
+      </section>
 
-          <!-- Toolbar: tipo de atividade -->
-          <div class="results-toolbar" id="results-toolbar">
-            <span class="toolbar-label">🏷️ Definir tipo para todos os dias:</span>
-            <select id="set-all-type" class="tipo-select">
-              <option value="">Selecionar…</option>
-              <option value="Melhoria">Melhoria</option>
-              <option value="Correção">Correção</option>
-              <option value="Suporte">Suporte</option>
+      <!-- Passo 2: Horários -->
+      <section class="panel" id="step-2" aria-labelledby="step-2-title" hidden>
+        <header class="panel-header panel-header-row">
+          <div>
+            <h1 id="step-2-title">Horários</h1>
+            <p class="muted" id="period-label"></p>
+          </div>
+          <button type="button" class="btn btn-ghost" data-goto="1">
+            <svg class="icon"><use href="#i-chevron-left"></use></svg> Alterar período
+          </button>
+        </header>
+
+        <div class="paste-box">
+          <label for="paste-input" class="paste-label">Cole aqui os horários copiados do sistema de ponto</label>
+          <textarea id="paste-input" rows="4" placeholder="Selecione o espelho de ponto, copie (Ctrl+C) e cole aqui (Ctrl+V)." spellcheck="false"></textarea>
+          <div class="paste-actions">
+            <button type="button" class="btn btn-secondary" id="paste-clipboard">
+              <svg class="icon"><use href="#i-paste"></use></svg> Colar da área de transferência
+            </button>
+            <button type="button" class="btn btn-ghost" id="clear-punches">Limpar batidas</button>
+          </div>
+          <div id="paste-feedback" class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="days-head" aria-hidden="true">
+          <span>Dia</span><span>Batidas</span><span class="ta-r">Total</span>
+        </div>
+        <div id="days-list" class="days-list"></div>
+
+        <div class="action-bar">
+          <div class="action-bar-total">
+            <span class="muted">Total do período</span>
+            <strong id="period-total">00:00</strong>
+          </div>
+          <button type="button" class="btn btn-primary btn-lg" data-goto="3">Ver resultado</button>
+        </div>
+      </section>
+
+      <!-- Passo 3: Resultado e lançamento -->
+      <section class="panel" id="step-3" aria-labelledby="step-3-title" hidden>
+        <header class="panel-header panel-header-row">
+          <div>
+            <h1 id="step-3-title">Resultado</h1>
+            <p class="muted">Clique nas horas de um dia para lançar no Businessmap.</p>
+          </div>
+          <button type="button" class="btn btn-ghost" data-goto="2">
+            <svg class="icon"><use href="#i-chevron-left"></use></svg> Editar horários
+          </button>
+        </header>
+
+        <div class="summary" id="summary"></div>
+
+        <div class="toolbar">
+          <div class="field field-inline">
+            <label for="tipo-all">Tipo para todos</label>
+            <select id="tipo-all">
+              <option value="">—</option>
+              <option>Melhoria</option>
+              <option>Correção</option>
+              <option>Suporte</option>
             </select>
           </div>
+          <div class="toolbar-actions">
+            <button type="button" class="btn btn-secondary" id="export-btn">
+              <svg class="icon"><use href="#i-download"></use></svg> Exportar Excel
+            </button>
+            <button type="button" class="btn btn-primary" id="launch-pending">
+              <svg class="icon"><use href="#i-send"></use></svg> Lançar dias pendentes
+            </button>
+          </div>
+        </div>
 
-          <!-- Results Table -->
-          <div class="table-container">
-            <table class="results-table" id="results-table">
-              <thead>
-                <tr>
-                  <th>Data</th>
-                  <th>Dia</th>
-                  <th>Tempo Trabalhado</th>
-                  <th>Valor Redmine</th>
-                  <th>Tipo</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="results-body">
-                <!-- Populated by JS -->
-              </tbody>
-            </table>
+        <div id="result-list" class="result-list"></div>
+      </section>
+
+      <!-- Conferência -->
+      <section class="panel" id="view-conf" aria-labelledby="conf-title" hidden>
+        <header class="panel-header">
+          <h1 id="conf-title">Conferência</h1>
+          <p class="muted">Veja o que foi lançado no Businessmap: dia, quadro, card e subtarefa. Corrija ou exclua quando precisar.</p>
+        </header>
+
+        <div class="chips" role="group" aria-label="Atalhos de período">
+          <button type="button" class="chip" data-conf-range="today">Hoje</button>
+          <button type="button" class="chip" data-conf-range="week">Esta semana</button>
+          <button type="button" class="chip" data-conf-range="month">Este mês</button>
+          <button type="button" class="chip" data-conf-range="last-month">Mês anterior</button>
+        </div>
+
+        <form id="conf-form" class="conf-period" novalidate>
+          <div class="field">
+            <label for="conf-from">De</label>
+            <input type="date" id="conf-from" required />
+          </div>
+          <div class="field">
+            <label for="conf-to">Até</label>
+            <input type="date" id="conf-to" required />
+          </div>
+          <button type="submit" class="btn btn-primary">
+            <svg class="icon"><use href="#i-search"></use></svg> Buscar lançamentos
+          </button>
+        </form>
+
+        <div class="conf-filters" id="conf-filters" hidden>
+          <div class="field">
+            <label for="conf-board">Quadro</label>
+            <select id="conf-board"></select>
+          </div>
+          <div class="field">
+            <label for="conf-category">Categoria</label>
+            <select id="conf-category"></select>
+          </div>
+          <div class="field conf-search">
+            <label for="conf-q">Buscar</label>
+            <div class="search">
+              <svg class="icon"><use href="#i-search"></use></svg>
+              <input type="search" id="conf-q" placeholder="Card, subtarefa, ID ou comentário" />
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" id="conf-group-label">Agrupar por</span>
+            <div class="segmented" role="group" aria-labelledby="conf-group-label">
+              <button type="button" class="is-active" data-conf-group="day">Dia</button>
+              <button type="button" data-conf-group="card">Card</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="summary" id="conf-summary"></div>
+        <div id="conf-list" class="conf-list" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <footer class="footer container">
+      <span class="muted">Apontamento de Horas · lançamentos via API do Businessmap</span>
+    </footer>
+
+    <!-- Configurações -->
+    <dialog id="settings-dialog" class="dialog" aria-labelledby="settings-title">
+      <form method="dialog" class="dialog-body" id="settings-form">
+        <header class="dialog-header">
+          <h2 id="settings-title">Configurações</h2>
+          <button type="button" class="btn-icon" data-close aria-label="Fechar"><svg class="icon"><use href="#i-x"></use></svg></button>
+        </header>
+
+        <section class="settings-section">
+          <h3>Conexão com o Businessmap</h3>
+          <div class="field">
+            <label for="api-key">API Key</label>
+            <div class="input-group">
+              <input type="password" id="api-key" autocomplete="off" spellcheck="false" placeholder="Cole sua API Key" />
+              <button type="button" class="btn-icon" id="api-key-toggle" aria-label="Mostrar/ocultar chave"><svg class="icon"><use href="#i-eye"></use></svg></button>
+            </div>
+            <p class="hint">No Businessmap: canto superior direito → <strong>My Account</strong> → <strong>API</strong> → <strong>Show API key</strong>. A chave fica salva só neste navegador.</p>
+          </div>
+          <div id="conn-status" class="conn-status" aria-live="polite"></div>
+          <div class="row-actions">
+            <button type="button" class="btn btn-primary" id="api-key-save">Salvar e testar</button>
+            <button type="button" class="btn btn-ghost btn-danger-text" id="api-key-remove">Remover chave</button>
           </div>
         </section>
 
-        <!-- History Section -->
-        <section class="history-section glass-card" id="history-section" style="display: none">
-          <div class="history-header">
-            <h2>📁 Histórico de Lançamentos</h2>
-            <div class="history-header-actions">
-              <button type="button" class="btn-backup" id="export-backup-btn" title="Baixar backup do histórico (arquivo JSON)">
-                ⬇️ Backup
-              </button>
-              <button type="button" class="btn-backup" id="import-backup-btn" title="Restaurar histórico a partir de um arquivo de backup">
-                ⬆️ Restaurar
-              </button>
-              <input type="file" id="import-backup-input" accept="application/json,.json" style="display: none" />
-              <button type="button" class="btn-clear-history" id="clear-history-btn" title="Apagar todos os registros do histórico (neste navegador e no servidor)">
-                🗑️ Limpar histórico
-              </button>
-              <button type="button" class="btn-refresh-history" id="refresh-history-btn" title="Atualizar lista">
-                🔄
-              </button>
+        <section class="settings-section">
+          <h3>Preferências</h3>
+          <div class="form-grid form-grid-2">
+            <div class="field">
+              <label for="pref-journey">Jornada diária</label>
+              <input type="time" id="pref-journey" value="08:00" step="300" />
+              <p class="hint">Usada para comparar com HE/Ausências do ponto.</p>
             </div>
-          </div>
-
-          <p class="history-hint">
-            💾 Seu histórico fica salvo neste navegador e é sincronizado automaticamente com o servidor.
-            Assim, mesmo que o servidor gratuito reinicie, nada se perde.
-          </p>
-
-          <!-- History Filters -->
-          <div class="history-filters">
-            <div class="history-filter-group">
-              <label for="filter-colaborador">👤 Colaborador</label>
-              <input
-                type="text"
-                id="filter-colaborador"
-                placeholder="Filtrar por nome..."
-              />
+            <div class="field">
+              <label for="pref-theme">Tema</label>
+              <select id="pref-theme">
+                <option value="auto">Automático (sistema)</option>
+                <option value="light">Claro</option>
+                <option value="dark">Escuro</option>
+              </select>
             </div>
-            <div class="history-filter-group">
-              <label for="filter-mes">📅 Mês</label>
-              <input type="month" id="filter-mes" />
-            </div>
-            <button type="button" class="btn-secondary btn-filter-history" id="filter-history-btn">
-              🔍 Filtrar
-            </button>
-            <button type="button" class="btn-clear-filter" id="clear-filter-btn">
-              ✕ Limpar
-            </button>
-          </div>
-
-          <!-- History List -->
-          <div id="history-list" class="history-list">
-            <!-- Populated by JS -->
           </div>
         </section>
-      </main>
 
-      <!-- Footer -->
-      <footer class="footer">
-        <p>Sistema de Apontamento de Horas &copy; 2026</p>
-      </footer>
-    </div>
+        <footer class="dialog-footer">
+          <button type="button" class="btn btn-secondary" data-close>Fechar</button>
+        </footer>
+      </form>
+    </dialog>
 
-    <!-- Holiday Confirmation Modal -->
-    <div class="modal-overlay" id="holiday-confirm-modal" style="display: none">
-      <div class="modal-card">
-        <h3 id="holiday-modal-title">🎉 Feriado Detectado</h3>
-        <div id="holiday-modal-message" class="modal-message">
-          <!-- Populated by JS -->
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="btn-modal-cancel" id="holiday-modal-cancel">
-            Cancelar
-          </button>
-          <button type="button" class="btn-modal-confirm" id="holiday-modal-confirm">
-            Continuar mesmo assim
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Save History Confirmation Modal -->
-    <div class="modal-overlay" id="save-confirm-modal" style="display: none">
-      <div class="modal-card">
-        <h3>💾 Salvar no Histórico</h3>
-        <div class="modal-message">
-          <p>Confirma o salvamento deste apontamento no histórico?</p>
-          <p id="save-modal-info" class="save-modal-info"></p>
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="btn-modal-cancel" id="save-modal-cancel">
-            Cancelar
-          </button>
-          <button type="button" class="btn-modal-confirm" id="save-modal-confirm">
-            ✔ Salvar
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- History Detail Modal -->
-    <div class="modal-overlay" id="history-detail-modal" style="display: none">
-      <div class="modal-card history-detail-card">
-        <div class="history-detail-header">
-          <div class="history-detail-title">
-            <h3>📋 Detalhes do Apontamento</h3>
-            <div id="history-detail-meta" class="history-detail-meta"></div>
+    <!-- Lançamento no Businessmap -->
+    <dialog id="launch-dialog" class="dialog dialog-lg" aria-labelledby="launch-title">
+      <div class="dialog-body">
+        <header class="dialog-header">
+          <div>
+            <h2 id="launch-title">Lançar no Businessmap</h2>
+            <p class="muted" id="launch-subtitle"></p>
           </div>
-          <button type="button" class="btn-close-detail" id="close-detail-btn" title="Fechar">✕</button>
+          <button type="button" class="btn-icon" data-close aria-label="Fechar"><svg class="icon"><use href="#i-x"></use></svg></button>
+        </header>
+        <div id="launch-content" class="launch-content"></div>
+        <footer class="dialog-footer" id="launch-footer"></footer>
+      </div>
+    </dialog>
+
+    <!-- Editar lançamento (Conferência) -->
+    <dialog id="entry-dialog" class="dialog" aria-labelledby="entry-title">
+      <form class="dialog-body" id="entry-form" novalidate>
+        <header class="dialog-header">
+          <h2 id="entry-title">Editar lançamento</h2>
+          <button type="button" class="btn-icon" data-close aria-label="Fechar"><svg class="icon"><use href="#i-x"></use></svg></button>
+        </header>
+        <div class="settings-section">
+          <div id="entry-info" class="entry-info"></div>
+          <div class="form-grid form-grid-2">
+            <div class="field">
+              <label for="entry-time">Tempo (HH:MM)</label>
+              <input type="text" id="entry-time" inputmode="numeric" placeholder="00:00" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="entry-date">Data</label>
+              <input type="date" id="entry-date" />
+            </div>
+            <div class="field span-2">
+              <label for="entry-category">Categoria</label>
+              <select id="entry-category"></select>
+            </div>
+            <div class="field span-2">
+              <label for="entry-comment">Comentário</label>
+              <textarea id="entry-comment" rows="2" maxlength="1000"></textarea>
+            </div>
+          </div>
+          <div id="entry-note" class="alert alert-info" hidden></div>
+          <div id="entry-error" class="alert alert-error" hidden></div>
         </div>
-        <div id="history-detail-body" class="history-detail-body">
-          <!-- Populated by JS -->
-        </div>
-        <div class="modal-actions" style="margin-top: 1.5rem;">
-          <button type="button" class="btn-modal-cancel" id="close-detail-btn-2">Fechar</button>
-        </div>
+        <footer class="dialog-footer entry-footer">
+          <button type="button" class="btn btn-ghost btn-danger-text" id="entry-delete">
+            <svg class="icon"><use href="#i-trash"></use></svg> Excluir
+          </button>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn-secondary" data-close>Cancelar</button>
+          <button type="submit" class="btn btn-primary" id="entry-save">Salvar</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- Confirmação genérica -->
+    <dialog id="confirm-dialog" class="dialog dialog-sm" aria-labelledby="confirm-title">
+      <form method="dialog" class="dialog-body">
+        <header class="dialog-header"><h2 id="confirm-title"></h2></header>
+        <div id="confirm-message" class="confirm-message"></div>
+        <footer class="dialog-footer">
+          <button value="cancel" class="btn btn-secondary">Cancelar</button>
+          <button value="ok" class="btn btn-primary" id="confirm-ok">Confirmar</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="loading" id="loading" hidden>
+      <div class="loading-box" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="loading-text">Carregando…</span>
       </div>
     </div>
 
-    <!-- Botão Flutuante - Ver Histórico -->
-    <button type="button" class="btn-float-history" id="float-history-btn" style="display: none" title="Ver Histórico de Lançamentos">
-      <span>📁</span>
-      <span class="float-history-label">Histórico</span>
-    </button>
-
-    <!-- Duplicate Warning Modal -->
-    <div class="modal-overlay" id="duplicate-modal" style="display: none">
-      <div class="modal-card">
-        <h3>⚠️ Registro Duplicado</h3>
-        <div class="modal-message">
-          <p>Já existe um apontamento salvo para <strong id="dup-colaborador-name"></strong> neste período:</p>
-          <div id="dup-records-list" class="dup-records-list"></div>
-          <p class="dup-question">Deseja salvar mesmo assim (irá criar um novo registro paralelo)?</p>
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="btn-modal-cancel" id="dup-modal-cancel">Cancelar</button>
-          <button type="button" class="btn-modal-confirm btn-dup-confirm" id="dup-modal-confirm">Salvar assim mesmo</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Loading Overlay -->
-    <div class="loading-overlay" id="loading" style="display: none">
-      <div class="spinner"></div>
-      <p>Processando...</p>
-    </div>
-
-    <!-- Toast Notification -->
-    <div class="toast" id="toast"></div>
-
-    <script src="./js/app.js"></script>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </body>
 </html>
