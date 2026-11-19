@@ -1,2057 +1,864 @@
 /**
- * Sistema de Apontamento de Horas - Frontend JavaScript
- * Lógica de interação, chamadas à API e renderização
- * v2.0 — Persistência, descrição de intervalos e histórico
+ * Apontamento de Horas v3 — orquestração da interface.
+ *
+ * Passo 1: período e UF  →  Passo 2: batidas (colar/editar)  →  Passo 3: resultado e lançamento
  */
 
-// ============ Estado Global ============
+import {
+  computeDay, chooseDayTotal, minutesToHHMM, minutesToDecimal, parseTime, parseTimesheet,
+  eachDay, toISODateLocal, parseISODateLocal, isoToBr, brToIso, isWeekendIso, yearsInRange,
+  WEEKDAYS, WEEKDAYS_SHORT, weekdayIndex, DEFAULT_EXPECTED_MINUTES,
+} from "./hours.js";
+import { api, bm, getApiKey, setApiKey, clearApiKey, getBmUser, API_BASE } from "./api.js";
+import { openLaunch } from "./launch.js";
+import { initConference, showConference, resetConference } from "./conference.js";
+import {
+  esc, icon, $, $$, storage, toast, withLoading, openDialog, setupDialogs, confirmDialog,
+  applyTheme, downloadBlob,
+} from "./ui.js";
+
+const SETTINGS_KEY = "apnt_settings_v3";
+const DRAFT_KEY = "apnt_draft_v3";
+const MAX_PERIOD_DAYS = 93;
+
+const DAY_KINDS = {
+  ferias: "Férias",
+  atestado: "Atestado",
+  afastamento: "Afastamento",
+  banco: "Banco de horas",
+  feriado_manual: "Feriado manual",
+};
+const TIPOS = ["Melhoria", "Correção", "Suporte"];
+const FALLBACK_UFS = ["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"];
+
+// ============ Estado ============
+
+const settings = { uf: "GO", journey: "08:00", theme: "auto", ...storage.get(SETTINGS_KEY, {}) };
 
 const state = {
-  selectionType: "period",
-  exceptions: [],
-  results: null,
-  states: [],
-  days: [],      // Lista de dias gerados
-  holidays: {},  // Feriados detectados
-  colaborador: "", // Nome do colaborador
-  historyRecords: [], // Histórico mesclado (local + servidor) da última carga
+  step: 1,
+  view: "apontar",
+  start: "",
+  end: "",
+  uf: settings.uf,
+  days: [],
 };
 
-// ============ Elementos DOM ============
+function saveSettings() {
+  storage.set(SETTINGS_KEY, settings);
+}
 
-const elements = {
-  // Colaborador
-  colaboradorName: document.getElementById("colaborador-name"),
+let draftTimer;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    storage.set(DRAFT_KEY, { start: state.start, end: state.end, uf: state.uf, days: state.days, step: state.step });
+  }, 300);
+}
 
-  // Toggle
-  btnPeriod: document.getElementById("btn-period"),
-  btnSingle: document.getElementById("btn-single"),
+function expectedMinutes() {
+  return parseTime(settings.journey) ?? DEFAULT_EXPECTED_MINUTES;
+}
 
-  // Date inputs
-  startDateGroup: document.getElementById("start-date-group"),
-  endDateGroup: document.getElementById("end-date-group"),
-  singleDateGroup: document.getElementById("single-date-group"),
-  startDate: document.getElementById("start-date"),
-  endDate: document.getElementById("end-date"),
-  singleDate: document.getElementById("single-date"),
+// ============ Regras do dia ============
 
-  // Form
-  form: document.getElementById("hours-form"),
-  stateSelect: document.getElementById("state-select"),
-  stateSelectGroup: document.getElementById("state-select-group"),
-  generateDaysBtn: document.getElementById("generate-days-btn"),
+function newDay(iso, holidays) {
+  return {
+    iso,
+    holiday: holidays[isoToBr(iso)] || null,
+    weekend: isWeekendIso(iso),
+    override: null, // null | "work" | chave de DAY_KINDS
+    intervals: [{ entry: "", exit: "" }],
+    overtime: null,
+    absence: null,
+    source: "marcacoes",
+    tipo: "",
+    launched: [],
+  };
+}
 
-  // Days list
-  daysListSection: document.getElementById("days-list-section"),
-  daysList: document.getElementById("days-list"),
-  exceptionsSection: document.getElementById("exceptions-section"),
-  analyzeBtn: document.getElementById("analyze-btn"),
-  pasteHoursBtn: document.getElementById("paste-hours-btn"),
+/** Situação do dia: útil ou não, com o motivo. */
+function dayStatus(day) {
+  if (day.override === "work") return { workday: true, label: day.holiday ? `Trabalhado (feriado: ${day.holiday})` : day.weekend ? "Trabalhado (fim de semana)" : "Dia útil" };
+  if (day.override && DAY_KINDS[day.override]) return { workday: false, label: DAY_KINDS[day.override] };
+  if (day.holiday) return { workday: false, label: `Feriado: ${day.holiday}` };
+  if (day.weekend) return { workday: false, label: "Fim de semana" };
+  return { workday: true, label: "Dia útil" };
+}
 
-  // Exceptions
-  exceptionDate: document.getElementById("exception-date"),
-  exceptionType: document.getElementById("exception-type"),
-  addExceptionBtn: document.getElementById("add-exception"),
-  exceptionsList: document.getElementById("exceptions-list"),
+function dayCalc(day) {
+  return computeDay({ intervals: day.intervals, overtime: day.overtime, absence: day.absence, expectedMinutes: expectedMinutes() });
+}
 
-  // Results
-  resultsSection: document.getElementById("results-section"),
-  summaryCards: document.getElementById("summary-cards"),
-  resultsBody: document.getElementById("results-body"),
-  exportBtn: document.getElementById("export-btn"),
+function dayTotal(day) {
+  if (!dayStatus(day).workday) return 0;
+  return chooseDayTotal(dayCalc(day), day.source);
+}
 
-  // Save confirmation
-  saveConfirmation: document.getElementById("save-confirmation"),
-  saveHistoryBtn: document.getElementById("save-history-btn"),
+const launchedMinutes = (day) => day.launched.reduce((a, l) => a + (l.minutes || 0), 0);
+const pendingMinutes = (day) => Math.max(0, dayTotal(day) - launchedMinutes(day));
 
-  // History
-  historySection: document.getElementById("history-section"),
-  historyList: document.getElementById("history-list"),
-  refreshHistoryBtn: document.getElementById("refresh-history-btn"),
-  clearHistoryBtn: document.getElementById("clear-history-btn"),
-  filterColaborador: document.getElementById("filter-colaborador"),
-  filterMes: document.getElementById("filter-mes"),
-  filterHistoryBtn: document.getElementById("filter-history-btn"),
-  clearFilterBtn: document.getElementById("clear-filter-btn"),
+function launchState(day) {
+  const total = dayTotal(day);
+  const done = launchedMinutes(day);
+  if (total === 0) return "empty";
+  if (done === 0) return "pending";
+  return done >= total ? "done" : "partial";
+}
 
-  // UI
-  loading: document.getElementById("loading"),
-  toast: document.getElementById("toast"),
-};
+const shortDate = (iso) => isoToBr(iso).slice(0, 5);
+const weekdayShort = (iso) => WEEKDAYS_SHORT[weekdayIndex(iso)];
 
 // ============ Inicialização ============
 
-document.addEventListener("DOMContentLoaded", () => {
-  initializeApp();
-});
+document.addEventListener("DOMContentLoaded", init);
 
-async function initializeApp() {
+async function init() {
+  applyTheme(settings.theme);
+  setupDialogs();
+  bindGlobal();
+  bindPeriod();
+  bindHours();
+  bindResult();
+  bindSettings();
+  initConference({ workedMinutes, onChanged: syncLaunched, needKey: openSettings });
+  updateConnectionBadge();
+  keepServerAwake();
+
   await loadStates();
-  setupEventListeners();
-  setDefaultDates();
-  restoreColaboradorName();
-  // Verificar se já há histórico para exibir o botão flutuante
-  checkAndShowFloatBtn();
-  // Iniciar ping anti-sono para o Render
-  setupAntiSleepPing();
-}
 
-function restoreColaboradorName() {
-  try {
-    const saved = localStorage.getItem(LS_COLAB_KEY);
-    if (saved && elements.colaboradorName) {
-      elements.colaboradorName.value = saved;
-      state.colaborador = saved;
-    }
-  } catch { /* localStorage indisponível */ }
-}
-
-// ============ API Calls ============
-
-const API_BASE = window.APP_CONFIG?.API_URL || '';
-
-// ============ Persistência Local (localStorage) ============
-// O histórico é salvo primeiro no navegador (nunca se perde) e sincronizado
-// com o servidor em segundo plano. Se o servidor gratuito do Render reiniciar
-// e perder o banco, os registros locais são reenviados automaticamente.
-
-const LS_HISTORY_KEY = "apnt_history_v1";
-const LS_COLAB_KEY = "apnt_colaborador";
-
-const ACTIVITY_TYPES = ["Melhoria", "Correção", "Suporte"];
-
-function generateUUID() {
-  if (window.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-  });
-}
-
-function getLocalHistory() {
-  try {
-    const data = JSON.parse(localStorage.getItem(LS_HISTORY_KEY));
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
+  const draft = storage.get(DRAFT_KEY, null);
+  if (draft?.days?.length && draft.start && draft.end) {
+    state.start = draft.start;
+    state.end = draft.end;
+    state.uf = draft.uf || settings.uf;
+    state.days = draft.days.map((d) => ({ ...newDay(d.iso, {}), ...d }));
+    $("#start-date").value = state.start;
+    $("#end-date").value = state.end;
+    $("#uf-select").value = state.uf;
+    goTo(Math.min(draft.step || 2, 3), { silent: true });
+  } else {
+    setRange("month");
+    goTo(1, { silent: true });
   }
-}
-
-function setLocalHistory(records) {
-  try {
-    localStorage.setItem(LS_HISTORY_KEY, JSON.stringify(records));
-  } catch (e) {
-    console.warn("Não foi possível salvar o histórico no navegador:", e);
-  }
-}
-
-function upsertLocalRecord(record) {
-  const records = getLocalHistory();
-  const idx = records.findIndex((r) => r.uuid === record.uuid);
-  if (idx >= 0) records[idx] = { ...records[idx], ...record };
-  else records.unshift(record);
-  setLocalHistory(records);
-}
-
-function removeLocalRecord(uuid) {
-  setLocalHistory(getLocalHistory().filter((r) => r.uuid !== uuid));
-}
-
-// Lápides de exclusão: uuids excluídos aqui que ainda precisam ser removidos
-// do servidor (evita que registros excluídos "ressuscitem" na sincronização).
-const LS_DELETED_KEY = "apnt_deleted_uuids_v1";
-
-function getDeletedUuids() {
-  try {
-    const data = JSON.parse(localStorage.getItem(LS_DELETED_KEY));
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
-}
-
-function addDeletedUuid(uuid) {
-  const deleted = getDeletedUuids();
-  if (!deleted.includes(uuid)) {
-    deleted.push(uuid);
-    try { localStorage.setItem(LS_DELETED_KEY, JSON.stringify(deleted)); } catch { /* ignore */ }
-  }
-}
-
-function clearDeletedUuid(uuid) {
-  try {
-    localStorage.setItem(LS_DELETED_KEY, JSON.stringify(getDeletedUuids().filter((u) => u !== uuid)));
-  } catch { /* ignore */ }
-}
-
-function clearLocalHistory() {
-  try {
-    localStorage.removeItem(LS_HISTORY_KEY);
-  } catch (e) {
-    console.warn("Não foi possível limpar o histórico do navegador:", e);
-  }
-}
-
-/**
- * Assinatura de conteúdo de um registro. Usada para reconhecer no servidor
- * registros salvos por uma versão que ainda não devolve o uuid — sem isso o
- * navegador reenviava o mesmo apontamento a cada carga do histórico.
- */
-function recordFingerprint(rec) {
-  return [
-    (rec.colaborador || "").trim().toLowerCase(),
-    rec.periodo_inicio || "",
-    rec.periodo_fim || "",
-    rec.criado_em || "",
-  ].join("|");
-}
-
-function parseCreatedAt(str) {
-  if (!str) return 0;
-  const m = str.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-  if (!m) return 0;
-  return new Date(m[3], m[2] - 1, m[1], m[4], m[5]).getTime();
-}
-
-function parseBrDate(str) {
-  if (!str) return null;
-  const [day, month, year] = str.split("/");
-  const d = new Date(year, month - 1, day);
-  return isNaN(d.getTime()) ? null : d;
-}
-
-function periodsOverlap(inicioA, fimA, inicioB, fimB) {
-  const a1 = parseBrDate(inicioA), a2 = parseBrDate(fimA);
-  const b1 = parseBrDate(inicioB), b2 = parseBrDate(fimB);
-  if (!a1 || !a2 || !b1 || !b2) return false;
-  return !(a2 < b1 || a1 > b2);
-}
-
-function normalizeTipo(tipo) {
-  return (tipo || "")
-    .toLowerCase()
-    .normalize("NFD") // remove acentos: Correção -> correcao
-    .replace(/[̀-ͯ]/g, "");
-}
-
-async function apiCall(endpoint, method = "GET", data = null) {
-  const options = {
-    method,
-    headers: { "Content-Type": "application/json" },
-  };
-  if (data) {
-    options.body = JSON.stringify(data);
-  }
-  const response = await fetch(`${API_BASE}${endpoint}`, options);
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => null);
-    const detail = errorBody?.detail || errorBody?.message || `Erro HTTP ${response.status}`;
-    throw new Error(detail);
-  }
-  return response;
 }
 
 async function loadStates() {
+  const select = $("#uf-select");
+  let states = FALLBACK_UFS.map((code) => ({ code, name: code }));
   try {
-    const response = await apiCall("/api/states");
-    state.states = await response.json();
-    state.states.forEach((s) => {
-      const option = document.createElement("option");
-      option.value = s.code;
-      option.textContent = `${s.code} - ${s.name}`;
-      elements.stateSelect.appendChild(option);
-    });
-    elements.stateSelect.value = "GO";
-  } catch (error) {
-    console.error("Erro ao carregar estados:", error);
-    showToast("Erro ao carregar estados", "error");
+    states = await api.states();
+  } catch {
+    /* servidor pode estar acordando; usa a lista local */
   }
+  select.innerHTML = states.map((s) => `<option value="${esc(s.code)}">${esc(s.code === s.name ? s.code : `${s.code} — ${s.name}`)}</option>`).join("");
+  select.value = state.uf || "GO";
 }
 
-// ============ Event Listeners ============
-
-function setupEventListeners() {
-  // Toggle de tipo de seleção
-  elements.btnPeriod.addEventListener("click", () => toggleSelectionType("period"));
-  elements.btnSingle.addEventListener("click", () => toggleSelectionType("single"));
-
-  // Gerar lista de dias
-  elements.generateDaysBtn.addEventListener("click", generateDaysList);
-
-  // Exceções
-  elements.addExceptionBtn.addEventListener("click", addException);
-
-  // Auto-gerar dias quando selecionar data (modo dia específico)
-  elements.singleDate.addEventListener("change", handleSingleDateChange);
-  elements.singleDate.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); handleSingleDateChange(); }
-  });
-
-  // Submit do formulário
-  elements.form.addEventListener("submit", handleSubmit);
-
-  // Exportar
-  elements.exportBtn.addEventListener("click", handleExport);
-
-  // Colar horários via Ctrl+V
-  document.addEventListener("paste", handlePasteEvent);
-  if (elements.pasteHoursBtn) {
-    elements.pasteHoursBtn.addEventListener("click", handlePasteButtonClick);
-  }
-
-  // Colaborador (lembrado entre visitas)
-  elements.colaboradorName.addEventListener("input", (e) => {
-    state.colaborador = e.target.value.trim();
-    try { localStorage.setItem(LS_COLAB_KEY, state.colaborador); } catch { /* ignore */ }
-  });
-
-  // Definir tipo de atividade para todos os dias
-  const setAllTypeSelect = document.getElementById("set-all-type");
-  if (setAllTypeSelect) {
-    setAllTypeSelect.addEventListener("change", (e) => {
-      if (e.target.value) setAllDayTypes(e.target.value);
-    });
-  }
-
-  // Backup / Restauração do histórico
-  const exportBackupBtn = document.getElementById("export-backup-btn");
-  const importBackupBtn = document.getElementById("import-backup-btn");
-  const importBackupInput = document.getElementById("import-backup-input");
-  if (exportBackupBtn) exportBackupBtn.addEventListener("click", exportBackup);
-  if (importBackupBtn && importBackupInput) {
-    importBackupBtn.addEventListener("click", () => importBackupInput.click());
-    importBackupInput.addEventListener("change", (e) => {
-      const file = e.target.files?.[0];
-      if (file) importBackup(file);
-      e.target.value = "";
-    });
-  }
-
-  // Salvar no histórico
-  if (elements.saveHistoryBtn) {
-    elements.saveHistoryBtn.addEventListener("click", () => showSaveConfirmModal());
-  }
-
-  // Histórico - filtros e refresh
-  if (elements.filterHistoryBtn) {
-    elements.filterHistoryBtn.addEventListener("click", () => loadHistory());
-  }
-  if (elements.clearFilterBtn) {
-    elements.clearFilterBtn.addEventListener("click", () => {
-      elements.filterColaborador.value = "";
-      elements.filterMes.value = "";
-      loadHistory();
-    });
-  }
-  if (elements.refreshHistoryBtn) {
-    elements.refreshHistoryBtn.addEventListener("click", () => loadHistory());
-  }
-  if (elements.clearHistoryBtn) {
-    elements.clearHistoryBtn.addEventListener("click", clearAllHistory);
-  }
-
-  // Filtro em tempo real ao digitar colaborador (com debounce)
-  let debounceTimer;
-  if (elements.filterColaborador) {
-    elements.filterColaborador.addEventListener("input", () => {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => loadHistory(), 600);
-    });
-  }
-
-  // Modal de detalhes do histórico
-  const closeDetailBtn = document.getElementById("close-detail-btn");
-  const closeDetailBtn2 = document.getElementById("close-detail-btn-2");
-  const detailModal = document.getElementById("history-detail-modal");
-  if (closeDetailBtn) closeDetailBtn.addEventListener("click", () => { detailModal.style.display = "none"; });
-  if (closeDetailBtn2) closeDetailBtn2.addEventListener("click", () => { detailModal.style.display = "none"; });
-  if (detailModal) {
-    detailModal.addEventListener("click", (e) => {
-      if (e.target === detailModal) detailModal.style.display = "none";
-    });
-  }
-
-  // Botão flutuante de histórico
-  const floatBtn = document.getElementById("float-history-btn");
-  if (floatBtn) {
-    floatBtn.addEventListener("click", () => {
-      elements.historySection.style.display = "block";
-      loadHistory();
-      elements.historySection.scrollIntoView({ behavior: "smooth" });
-      floatBtn.style.display = "none";
-    });
-  }
-
-  // Modal de aviso de duplicata
-  const dupModal = document.getElementById("duplicate-modal");
-  const dupCancelBtn = document.getElementById("dup-modal-cancel");
-  if (dupCancelBtn) {
-    dupCancelBtn.addEventListener("click", () => { dupModal.style.display = "none"; });
-  }
-  if (dupModal) {
-    dupModal.addEventListener("click", (e) => {
-      if (e.target === dupModal) dupModal.style.display = "none";
-    });
-  }
+function keepServerAwake() {
+  const ping = () => api.health().catch(() => {});
+  ping();
+  setInterval(ping, 10 * 60 * 1000);
 }
 
-// ============ Toggle Selection Type ============
+// ============ Navegação ============
 
-function toggleSelectionType(type) {
-  state.selectionType = type;
-  elements.btnPeriod.classList.toggle("active", type === "period");
-  elements.btnSingle.classList.toggle("active", type === "single");
+function goTo(step, { silent = false } = {}) {
+  if (step > 1 && !state.days.length) {
+    if (!silent) toast("Defina o período primeiro.", "info");
+    step = 1;
+  }
+  state.step = step;
+  if (state.view !== "apontar") return;
+  [1, 2, 3].forEach((n) => ($(`#step-${n}`).hidden = n !== step));
+  $$(".step").forEach((btn) => {
+    const n = Number(btn.dataset.step);
+    btn.classList.toggle("is-active", n === step);
+    btn.classList.toggle("is-done", n < step);
+    btn.setAttribute("aria-current", n === step ? "step" : "false");
+    btn.disabled = n > 1 && !state.days.length;
+  });
+  if (step === 2) renderDays();
+  if (step === 3) renderResult();
+  saveDraft();
+  if (!silent) window.scrollTo({ top: 0, behavior: "smooth" });
+}
 
-  if (type === "period") {
-    elements.startDateGroup.style.display = "block";
-    elements.endDateGroup.style.display = "block";
-    elements.singleDateGroup.style.display = "none";
-    if (elements.stateSelectGroup) elements.stateSelectGroup.style.display = "block";
-    elements.generateDaysBtn.style.display = "flex";
-    // Restaurar required nos campos visíveis de período
-    elements.startDate.setAttribute("required", "");
-    elements.endDate.setAttribute("required", "");
-    elements.stateSelect.setAttribute("required", "");
+function setView(view) {
+  state.view = view;
+  const conf = view === "conferencia";
+  $$(".view-tab").forEach((t) => {
+    const on = t.dataset.view === view;
+    t.classList.toggle("is-active", on);
+    if (on) t.setAttribute("aria-current", "page");
+    else t.removeAttribute("aria-current");
+  });
+  $(".stepper").hidden = conf;
+  $("#view-conf").hidden = !conf;
+  if (conf) {
+    [1, 2, 3].forEach((n) => ($(`#step-${n}`).hidden = true));
+    showConference();
   } else {
-    elements.startDateGroup.style.display = "none";
-    elements.endDateGroup.style.display = "none";
-    elements.singleDateGroup.style.display = "block";
-    if (elements.stateSelectGroup) elements.stateSelectGroup.style.display = "none";
-    elements.generateDaysBtn.style.display = "none";
-    // Remover required dos campos ocultos para não bloquear o submit
-    elements.startDate.removeAttribute("required");
-    elements.endDate.removeAttribute("required");
-    elements.stateSelect.removeAttribute("required");
-    setTimeout(() => { if (elements.singleDate.value) handleSingleDateChange(); }, 100);
+    goTo(state.step, { silent: true });
   }
-
-  elements.daysListSection.style.display = "none";
-  elements.exceptionsSection.style.display = "none";
-  elements.analyzeBtn.style.display = "none";
+  window.scrollTo({ top: 0 });
 }
 
-// ============ Auto-gerar Dia Específico ============
+function bindGlobal() {
+  $$(".view-tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 
-async function handleSingleDateChange() {
-  const dateValue = elements.singleDate.value;
-  if (!dateValue) return;
+  document.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-goto]");
+    if (go) goTo(Number(go.dataset.goto));
+    const step = e.target.closest(".step");
+    if (step && !step.disabled) goTo(Number(step.dataset.step));
+  });
 
-  const stateUF = "GO";
-  const year = new Date(dateValue).getFullYear();
-  showLoading(true);
+  $("#theme-toggle").addEventListener("click", () => {
+    const current = document.documentElement.dataset.theme
+      || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    settings.theme = current === "dark" ? "light" : "dark";
+    applyTheme(settings.theme);
+    saveSettings();
+    $("#pref-theme").value = settings.theme;
+  });
 
-  try {
-    const response = await apiCall(`/api/holidays/${year}/${stateUF}`);
-    const data = await response.json();
-    const holidaysData = data.holidays || {};
-    const dateAPI = formatDateForAPI(dateValue);
-    const isHoliday = !!holidaysData[dateAPI];
-    const holidayName = holidaysData[dateAPI] || null;
-    const isWeekendDay = isWeekend(dateValue);
-
-    if (isHoliday) {
-      showLoading(false);
-      const confirmed = await showHolidayConfirmModal(dateAPI, holidayName);
-      if (!confirmed) { showToast("Lançamento cancelado", "info"); return; }
-      showLoading(true);
-    }
-    if (isWeekendDay) {
-      showLoading(false);
-      const dayName = getDayOfWeekName(dateValue);
-      const confirmed = await showWeekendConfirmModal(dateAPI, dayName);
-      if (!confirmed) { showToast("Lançamento cancelado", "info"); return; }
-      showLoading(true);
-    }
-
-    const dayInfo = {
-      date: dateValue,
-      dateDisplay: dateAPI,
-      dayName: getDayOfWeekName(dateValue),
-      isWeekend: isWeekendDay,
-      isHoliday,
-      holidayName,
-      intervals: [
-        { entry: "", exit: "" },
-      ],
-      overtime: "00:00",
-      absence: "00:00",
-      totalHours: 0,
-      status: "pending",
-    };
-
-    state.days = [dayInfo];
-    state.holidays = holidaysData;
-    renderDaysList();
-
-    elements.daysListSection.style.display = "block";
-    elements.exceptionsSection.style.display = "block";
-    elements.analyzeBtn.style.display = "flex";
-    showToast("Dia gerado com sucesso!", "success");
-  } catch (error) {
-    console.error("Erro:", error);
-    showToast("Erro ao gerar dia", "error");
-  } finally {
-    showLoading(false);
-  }
-}
-
-// ============ Modais de Confirmação ============
-
-function showHolidayConfirmModal(dateStr, holidayName) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById("holiday-confirm-modal");
-    const titleEl = document.getElementById("holiday-modal-title");
-    const messageEl = document.getElementById("holiday-modal-message");
-    const confirmBtn = document.getElementById("holiday-modal-confirm");
-    const cancelBtn = document.getElementById("holiday-modal-cancel");
-
-    if (!modal) { resolve(confirm(`A data ${dateStr} é feriado (${holidayName}).\n\nDeseja realmente lançar horas neste dia?`)); return; }
-
-    titleEl.textContent = "🎉 Feriado Detectado";
-    messageEl.innerHTML = `
-      <p>A data <strong>${dateStr}</strong> é um feriado:</p>
-      <p class="holiday-name">📅 ${holidayName}</p>
-      <p>Deseja realmente lançar horas neste dia?</p>
-    `;
-    modal.style.display = "flex";
-
-    const cleanup = () => {
-      confirmBtn.removeEventListener("click", handleConfirm);
-      cancelBtn.removeEventListener("click", handleCancel);
-    };
-    const handleConfirm = () => { modal.style.display = "none"; cleanup(); resolve(true); };
-    const handleCancel = () => { modal.style.display = "none"; cleanup(); resolve(false); };
-
-    confirmBtn.addEventListener("click", handleConfirm);
-    cancelBtn.addEventListener("click", handleCancel);
+  // Ctrl+V em qualquer lugar do passo 2 (fora de campos) aplica os horários.
+  document.addEventListener("paste", (e) => {
+    if (state.view !== "apontar" || state.step !== 2) return;
+    const tag = document.activeElement?.tagName;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+    const text = e.clipboardData?.getData("text/plain");
+    if (!text) return;
+    e.preventDefault();
+    $("#paste-input").value = text;
+    applyPaste(text);
   });
 }
 
-function showWeekendConfirmModal(dateStr, dayName) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById("holiday-confirm-modal");
-    const titleEl = document.getElementById("holiday-modal-title");
-    const messageEl = document.getElementById("holiday-modal-message");
-    const confirmBtn = document.getElementById("holiday-modal-confirm");
-    const cancelBtn = document.getElementById("holiday-modal-cancel");
+// ============ Passo 1: período ============
 
-    if (!modal) { resolve(confirm(`A data ${dateStr} é ${dayName} (final de semana).\n\nDeseja realmente lançar horas neste dia?`)); return; }
-
-    titleEl.textContent = "🗓️ Final de Semana";
-    messageEl.innerHTML = `
-      <p>A data <strong>${dateStr}</strong> é <strong>${dayName}</strong> (final de semana).</p>
-      <p>Deseja realmente lançar horas neste dia?</p>
-    `;
-    modal.style.display = "flex";
-
-    const cleanup = () => {
-      confirmBtn.removeEventListener("click", handleConfirm);
-      cancelBtn.removeEventListener("click", handleCancel);
-    };
-    const handleConfirm = () => { modal.style.display = "none"; cleanup(); resolve(true); };
-    const handleCancel = () => { modal.style.display = "none"; cleanup(); resolve(false); };
-
-    confirmBtn.addEventListener("click", handleConfirm);
-    cancelBtn.addEventListener("click", handleCancel);
-  });
-}
-
-function showSaveConfirmModal() {
-  // Verificar duplicatas ANTES de mostrar o modal de confirmação
-  checkDuplicateAndSave();
-}
-
-async function checkDuplicateAndSave() {
-  // Garantir que o colaborador está sempre atualizado a partir do campo de input
-  const colaborador = elements.colaboradorName.value.trim() || state.colaborador;
-
-  if (!colaborador) {
-    showToast("Informe seu nome antes de salvar", "error");
-    elements.colaboradorName.focus();
-    return;
-  }
-
-  // Sincronizar state com o valor atual do input
-  state.colaborador = colaborador;
-
-  const periodoInicio = state.days[0]?.dateDisplay || "";
-  const periodoFim = state.days[state.days.length - 1]?.dateDisplay || "";
-
-  if (!periodoInicio || !periodoFim) {
-    showToast("Nenhum período carregado. Gere a lista de dias primeiro.", "error");
-    return;
-  }
-
-  // Verificação local primeiro (funciona mesmo com o servidor dormindo)
-  const localConflicts = getLocalHistory().filter(
-    (r) =>
-      r.colaborador?.toLowerCase() === colaborador.toLowerCase() &&
-      periodsOverlap(periodoInicio, periodoFim, r.periodo_inicio, r.periodo_fim)
-  );
-  if (localConflicts.length > 0) {
-    showDuplicateWarningModal(colaborador, localConflicts);
-    return;
-  }
-
-  showLoading(true);
-  try {
-    const params = new URLSearchParams({ colaborador, periodo_inicio: periodoInicio, periodo_fim: periodoFim });
-    const response = await apiCall(`/api/verificar-duplicata?${params}`);
-    const data = await response.json();
-    showLoading(false);
-
-    if (data.duplicata && data.registros.length > 0) {
-      // Mostrar modal de aviso de duplicata
-      showDuplicateWarningModal(colaborador, data.registros);
-    } else {
-      // Sem duplicata — mostrar modal de confirmação normal
-      showNormalSaveModal(colaborador, periodoInicio, periodoFim);
-    }
-  } catch (error) {
-    showLoading(false);
-    console.error("Erro ao verificar duplicata:", error);
-    // Em caso de erro na verificação, deixar salvar normalmente
-    showNormalSaveModal(colaborador, periodoInicio, periodoFim);
-  }
-}
-
-function showDuplicateWarningModal(colaborador, conflitos) {
-  const modal = document.getElementById("duplicate-modal");
-  const dupNameEl = document.getElementById("dup-colaborador-name");
-  const dupListEl = document.getElementById("dup-records-list");
-  const confirmBtn = document.getElementById("dup-modal-confirm");
-  const cancelBtn = document.getElementById("dup-modal-cancel");
-
-  if (dupNameEl) dupNameEl.textContent = colaborador;
-
-  if (dupListEl) {
-    dupListEl.innerHTML = conflitos.map(rec => `
-      <div class="dup-record-item">
-        <span class="dup-record-period">📅 ${rec.periodo_inicio} → ${rec.periodo_fim}</span>
-        <span class="dup-record-total">⏱️ ${(rec.total_horas || 0).toFixed(2)}h</span>
-        <span class="dup-record-date">🕐 Salvo: ${rec.criado_em}</span>
-      </div>
-    `).join("");
-  }
-
-  modal.style.display = "flex";
-
-  // Remover listeners anteriores clonando o botão
-  const newConfirm = confirmBtn.cloneNode(true);
-  confirmBtn.parentNode.replaceChild(newConfirm, confirmBtn);
-  const newCancel = cancelBtn.cloneNode(true);
-  cancelBtn.parentNode.replaceChild(newCancel, cancelBtn);
-
-  document.getElementById("dup-modal-cancel").addEventListener("click", () => {
-    modal.style.display = "none";
-  });
-  document.getElementById("dup-modal-confirm").addEventListener("click", () => {
-    modal.style.display = "none";
-    // Salvar mesmo com duplicata
-    saveToHistory();
-  });
-}
-
-function showNormalSaveModal(colaborador, periodoInicio, periodoFim) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById("save-confirm-modal");
-    const confirmBtn = document.getElementById("save-modal-confirm");
-    const cancelBtn = document.getElementById("save-modal-cancel");
-    const infoEl = document.getElementById("save-modal-info");
-
-    if (infoEl) {
-      infoEl.innerHTML = `
-        <strong>Colaborador:</strong> ${colaborador}<br>
-        <strong>Período:</strong> ${periodoInicio} → ${periodoFim}
-      `;
-    }
-
-    modal.style.display = "flex";
-
-    const cleanup = () => {
-      confirmBtn.removeEventListener("click", handleConfirm);
-      cancelBtn.removeEventListener("click", handleCancel);
-    };
-    const handleConfirm = () => { modal.style.display = "none"; cleanup(); resolve(true); saveToHistory(); };
-    const handleCancel = () => { modal.style.display = "none"; cleanup(); resolve(false); };
-
-    confirmBtn.addEventListener("click", handleConfirm);
-    cancelBtn.addEventListener("click", handleCancel);
-  });
-}
-
-// ============ Helpers ============
-
-function setDefaultDates() {
+function setRange(kind) {
   const today = new Date();
-  const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
-  elements.startDate.value = formatDateForInput(firstDay);
-  elements.endDate.value = formatDateForInput(today);
-  elements.singleDate.value = formatDateForInput(today);
-}
-
-function formatDateForInput(date) {
-  return date.toISOString().split("T")[0];
-}
-
-function formatDateForAPI(dateStr) {
-  if (!dateStr) return "";
-  const [year, month, day] = dateStr.split("-");
-  return `${day}/${month}/${year}`;
-}
-
-function formatDateFromAPI(dateStr) {
-  if (!dateStr) return "";
-  const [day, month, year] = dateStr.split("/");
-  return `${year}-${month}-${day}`;
-}
-
-function getDayOfWeekName(dateStr) {
-  const days = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
-  const [year, month, day] = dateStr.split("-");
-  const date = new Date(year, month - 1, day);
-  return days[date.getDay()];
-}
-
-function isWeekend(dateStr) {
-  const [year, month, day] = dateStr.split("-");
-  const date = new Date(year, month - 1, day);
-  return date.getDay() === 0 || date.getDay() === 6;
-}
-
-// ============ Generate Days List ============
-
-async function generateDaysList() {
-  let startDate, endDate;
-
-  if (state.selectionType === "period") {
-    startDate = elements.startDate.value;
-    endDate = elements.endDate.value;
-    if (!startDate || !endDate) { showToast("Preencha as datas inicial e final", "error"); return; }
-    if (new Date(endDate) < new Date(startDate)) { showToast("Data final deve ser maior que a inicial", "error"); return; }
-  } else {
-    startDate = elements.singleDate.value;
-    endDate = startDate;
-    if (!startDate) { showToast("Selecione a data", "error"); return; }
-  }
-
-  const stateUF = elements.stateSelect.value;
-  if (!stateUF) { showToast("Selecione o estado", "error"); return; }
-
-  showLoading(true);
-  try {
-    const year = new Date(startDate).getFullYear();
-    const response = await apiCall(`/api/holidays/${year}/${stateUF}`);
-    const data = await response.json();
-    state.holidays = data.holidays || {};
-
-    const days = [];
-    let current = new Date(startDate);
-    const end = new Date(endDate);
-
-    while (current <= end) {
-      const dateStr = formatDateForInput(current);
-      const dateAPI = formatDateForAPI(dateStr);
-      days.push({
-        date: dateStr,
-        dateDisplay: dateAPI,
-        dayName: getDayOfWeekName(dateStr),
-        isWeekend: isWeekend(dateStr),
-        isHoliday: !!state.holidays[dateAPI],
-        holidayName: state.holidays[dateAPI] || null,
-        intervals: [
-          { entry: "", exit: "" },
-        ],
-        overtime: "00:00",
-        absence: "00:00",
-        totalHours: 0,
-        status: "pending",
-      });
-      current.setDate(current.getDate() + 1);
+  const d = (y, m, day) => toISODateLocal(new Date(y, m, day));
+  const y = today.getFullYear();
+  const m = today.getMonth();
+  let start, end;
+  switch (kind) {
+    case "today": start = end = toISODateLocal(today); break;
+    case "yesterday": start = end = d(y, m, today.getDate() - 1); break;
+    case "week": {
+      const offset = (today.getDay() + 6) % 7; // segunda-feira
+      start = d(y, m, today.getDate() - offset);
+      end = toISODateLocal(today);
+      break;
     }
-
-    state.days = days;
-    renderDaysList();
-
-    elements.daysListSection.style.display = "block";
-    elements.exceptionsSection.style.display = "block";
-    elements.analyzeBtn.style.display = "flex";
-    showToast(`${days.length} dia(s) gerado(s)`, "success");
-  } catch (error) {
-    console.error("Erro:", error);
-    showToast("Erro ao gerar lista de dias", "error");
-  } finally {
-    showLoading(false);
+    case "last-month": start = d(y, m - 1, 1); end = d(y, m, 0); break;
+    default: start = d(y, m, 1); end = toISODateLocal(today);
   }
+  $("#start-date").value = start;
+  $("#end-date").value = end;
+  $$(".chip[data-range]").forEach((c) => c.classList.toggle("is-active", c.dataset.range === kind));
 }
 
-// ============ Render Days List (com descrição por intervalo) ============
-
-function renderDaysList() {
-  elements.daysList.innerHTML = state.days
-    .map((day, index) => {
-      const isNonWorkday = day.isWeekend || day.isHoliday || isException(day.dateDisplay);
-      const rowClass = day.isWeekend ? "weekend" : day.isHoliday ? "holiday" : "";
-
-      if (isNonWorkday) {
-        const reason = day.isWeekend
-          ? "Final de Semana"
-          : day.isHoliday
-          ? `Feriado: ${day.holidayName}`
-          : getExceptionType(day.dateDisplay);
-
-        return `
-          <div class="day-row non-workday ${rowClass}" data-index="${index}">
-            <span class="day-date">${day.dateDisplay}</span>
-            <span class="day-name">${day.dayName}</span>
-            <span class="day-type-badge">📅 ${reason}</span>
-          </div>
-        `;
-      }
-
-      // Intervalos sem wrapper e sem espaços para alinhar com o grid
-      const intervalsHtml = day.intervals.map((interval, intervalIndex) => 
-        `<input type="time" class="time-input" value="${interval.entry}" onchange="updateIntervalTime(${index}, ${intervalIndex}, 'entry', this.value)" placeholder="08:00" title="Entrada ${intervalIndex + 1}"><input type="time" class="time-input" value="${interval.exit}" onchange="updateIntervalTime(${index}, ${intervalIndex}, 'exit', this.value)" placeholder="12:00" title="Saída ${intervalIndex + 1}">`
-      ).join('');
-
-      // Espaços vazios se houver apenas 1 intervalo, para manter o Total na coluna correta
-      const placeholders = day.intervals.length === 1 ? '<span></span><span></span>' : '';
-
-      const actionsHtml = `
-        <div class="day-actions">
-          <button type="button" class="btn-add-interval" onclick="addInterval(${index})" title="Adicionar intervalo">➕</button>
-          ${day.intervals.length > 1 ? `
-          <button type="button" class="btn-remove-interval" onclick="removeLastInterval(${index})" title="Remover último intervalo">➖</button>
-          ` : ''}
-        </div>
-      `;
-
-      // Informações de balanço (HE/Ausências) para o alerta
-      const hasBalance = day.overtime !== "00:00" || day.absence !== "00:00";
-      const balanceHtml = hasBalance ? `
-        <div class="day-balance-info">
-          <div class="balance-item"><span class="label">HE:</span><span class="value overtime">${day.overtime}</span></div>
-          <div class="balance-item"><span class="label">AUS:</span><span class="value absence">${day.absence}</span></div>
-        </div>
-      ` : '<div></div>';
-
-      // Ícone de alerta se houver divergência (calculado no calculateDayTotal)
-      const divergenceAlert = day.hasDivergence ? `
-        <span class="divergence-alert" title="Atenção: O cálculo do Redmine (8h + HE - Ausências) divergiu das marcações e foi priorizado.">!</span>
-      ` : '';
-
-      return `
-        <div class="day-row workday ${day.hasDivergence ? 'divergent-row' : ''}" data-index="${index}" data-intervals="${day.intervals.length}">
-          <span class="day-date">${day.dateDisplay}</span>
-          <span class="day-name">${day.dayName}</span>
-          ${intervalsHtml}${placeholders}
-          ${balanceHtml}
-          <span class="day-total" id="total-${index}">
-            ${formatTotalHours(day.totalHours)}${divergenceAlert}
-          </span>
-          ${actionsHtml}
-        </div>
-      `;
-    })
-    .join("");
+function bindPeriod() {
+  $$(".chip[data-range]").forEach((chip) => chip.addEventListener("click", () => setRange(chip.dataset.range)));
+  ["#start-date", "#end-date"].forEach((sel) =>
+    $(sel).addEventListener("input", () => $$(".chip[data-range]").forEach((c) => c.classList.remove("is-active"))),
+  );
+  $("#period-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await buildPeriod($("#start-date").value, $("#end-date").value, $("#uf-select").value);
+  });
 }
 
-// ============ Interval Functions ============
-
-function updateIntervalTime(dayIndex, intervalIndex, field, value) {
-  state.days[dayIndex].intervals[intervalIndex][field] = value;
-  calculateDayTotal(dayIndex);
-}
-
-function addInterval(dayIndex) {
-  state.days[dayIndex].intervals.push({ entry: "", exit: "" });
-  renderDaysList();
-}
-
-function removeInterval(dayIndex, intervalIndex) {
-  if (state.days[dayIndex].intervals.length > 1) {
-    state.days[dayIndex].intervals.splice(intervalIndex, 1);
-    calculateDayTotal(dayIndex);
-    renderDaysList();
-  }
-}
-
-function removeLastInterval(dayIndex) {
-  if (state.days[dayIndex].intervals.length > 1) {
-    state.days[dayIndex].intervals.pop();
-    calculateDayTotal(dayIndex);
-    renderDaysList();
-  }
-}
-
-function calculateDayTotal(dayIndex) {
-  const day = state.days[dayIndex];
-  let totalMinutes = 0;
-
-  for (const interval of day.intervals) {
-    if (interval.entry && interval.exit) {
-      const start = timeToMinutes(interval.entry);
-      const end = timeToMinutes(interval.exit);
-      if (end > start) totalMinutes += end - start;
+async function fetchHolidays(start, end, uf) {
+  const result = {};
+  for (const year of yearsInRange(start, end)) {
+    try {
+      Object.assign(result, (await api.holidays(year, uf)).holidays || {});
+    } catch {
+      toast(`Não foi possível carregar os feriados de ${year}. Confira os dias manualmente.`, "warn", 5000);
     }
-  }
-
-  day.totalHours = totalMinutes / 60;
-  
-  // NOVA LÓGICA: Cálculo Redmine (8h + HE - Ausências)
-  const baseMinutes = 8 * 60;
-  const heMinutes = timeToMinutes(day.overtime || "00:00");
-  const absMinutes = timeToMinutes(day.absence || "00:00");
-  const redmineTotalHours = (baseMinutes + heMinutes - absMinutes) / 60;
-
-  // Comparação e priorização
-  // Usamos uma tolerância pequena para lidar com arredondamentos de float se necessário
-  const diff = Math.abs(day.totalHours - redmineTotalHours);
-  if ((day.overtime !== "00:00" || day.absence !== "00:00") && diff > 0.001) {
-    day.totalHours = redmineTotalHours;
-    day.hasDivergence = true;
-  } else {
-    day.hasDivergence = false;
-  }
-
-  const totalElement = document.getElementById(`total-${dayIndex}`);
-  if (totalElement) totalElement.textContent = formatTotalHours(day.totalHours);
-}
-
-function timeToMinutes(timeStr) {
-  if (!timeStr) return 0;
-  const [hours, minutes] = timeStr.split(":").map(Number);
-  return hours * 60 + minutes;
-}
-
-function minutesToTime(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
-}
-
-function formatTotalHours(hours) {
-  if (hours === 0) return "--:--";
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
-  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
-}
-
-function hoursToRedmine(hours) {
-  return hours.toFixed(2);
-}
-
-// Expor funções para uso global (onclick inline no HTML)
-window.updateIntervalTime = updateIntervalTime;
-window.addInterval = addInterval;
-window.removeInterval = removeInterval;
-window.removeLastInterval = removeLastInterval;
-
-// ============ Paste Feature ============
-
-function parsePastedTimesheet(text) {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})\s/;
-  const timeRegex = /^\d{2}:\d{2}$/;
-  const result = [];
-  let currentDay = null;
-  let expectingTime = null;
-  let currentEntry = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const dateMatch = line.match(dateRegex);
-    
-    if (dateMatch) {
-      if (currentDay && (currentDay.intervals.length > 0 || currentDay.overtime !== "00:00" || currentDay.absence !== "00:00")) {
-        result.push(currentDay);
-      }
-      currentDay = { 
-        date: dateMatch[1], 
-        intervals: [],
-        overtime: "00:00",
-        absence: "00:00"
-      };
-      currentEntry = null;
-      expectingTime = null;
-      continue;
-    }
-
-    if (!currentDay) continue;
-
-    const lowerLine = line.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    
-    // Detecção de HE e Ausências
-    if (lowerLine.includes('horas extras')) {
-      const val = line.match(/(\d{2}:\d{2})/) ? line.match(/(\d{2}:\d{2})/)[1] : (lines[i+1] && lines[i+1].match(/(\d{2}:\d{2})/) ? lines[i+1].match(/(\d{2}:\d{2})/)[1] : null);
-      if (val) currentDay.overtime = val;
-      continue;
-    }
-    
-    if (lowerLine.includes('ausencias')) {
-      const val = line.match(/(\d{2}:\d{2})/) ? line.match(/(\d{2}:\d{2})/)[1] : (lines[i+1] && lines[i+1].match(/(\d{2}:\d{2})/) ? lines[i+1].match(/(\d{2}:\d{2})/)[1] : null);
-      if (val) currentDay.absence = val;
-      continue;
-    }
-
-    if (lowerLine === 'entrada') { expectingTime = 'entry'; continue; }
-    if (lowerLine === 'saida') { expectingTime = 'exit'; continue; }
-
-    if (timeRegex.test(line) && expectingTime) {
-      if (expectingTime === 'entry') {
-        currentEntry = { entry: line, exit: '' };
-      } else if (expectingTime === 'exit' && currentEntry) {
-        currentEntry.exit = line;
-        currentDay.intervals.push({ ...currentEntry });
-        currentEntry = null;
-      }
-      expectingTime = null;
-    }
-  }
-  if (currentDay && (currentDay.intervals.length > 0 || currentDay.overtime !== "00:00" || currentDay.absence !== "00:00")) {
-    result.push(currentDay);
   }
   return result;
 }
 
-function applyPastedData(parsedDays) {
-  let filledCount = 0;
-  const filledIndices = [];
+async function buildPeriod(start, end, uf) {
+  if (!parseISODateLocal(start) || !parseISODateLocal(end)) return toast("Informe as datas inicial e final.", "error");
+  if (end < start) return toast("A data final deve ser igual ou posterior à inicial.", "error");
+  const isos = eachDay(start, end);
+  if (isos.length > MAX_PERIOD_DAYS) return toast(`Escolha um período de até ${MAX_PERIOD_DAYS} dias.`, "error");
 
-  for (const parsed of parsedDays) {
-    const dayIndex = state.days.findIndex(d => d.dateDisplay === parsed.date);
-    if (dayIndex === -1) continue;
-    const day = state.days[dayIndex];
-    if (day.isWeekend || day.isHoliday || isException(day.dateDisplay)) continue;
+  const holidays = await withLoading("Carregando feriados…", () => fetchHolidays(start, end, uf));
+  const previous = new Map(state.days.map((d) => [d.iso, d]));
+  state.days = isos.map((iso) => {
+    const fresh = newDay(iso, holidays);
+    const old = previous.get(iso);
+    return old ? { ...old, holiday: fresh.holiday, weekend: fresh.weekend } : fresh;
+  });
+  state.start = start;
+  state.end = end;
+  state.uf = uf;
+  settings.uf = uf;
+  saveSettings();
+  $("#paste-feedback").innerHTML = "";
+  goTo(2);
+}
 
-    while (day.intervals.length < parsed.intervals.length) {
-      day.intervals.push({ entry: '', exit: '' });
+// ============ Passo 2: horários ============
+
+function bindHours() {
+  const textarea = $("#paste-input");
+  textarea.addEventListener("paste", () => setTimeout(() => applyPaste(textarea.value), 0));
+  textarea.addEventListener("change", () => textarea.value.trim() && applyPaste(textarea.value));
+
+  $("#paste-clipboard").addEventListener("click", async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) return toast("A área de transferência está vazia.", "info");
+      textarea.value = text;
+      applyPaste(text);
+    } catch {
+      toast("O navegador não liberou a área de transferência. Clique no campo e use Ctrl+V.", "warn", 5000);
+      textarea.focus();
     }
-    for (let i = 0; i < parsed.intervals.length; i++) {
-      day.intervals[i].entry = parsed.intervals[i].entry;
-      day.intervals[i].exit = parsed.intervals[i].exit;
+  });
+
+  $("#clear-punches").addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "Limpar batidas",
+      message: "<p>Apagar todas as batidas do período? Os lançamentos já feitos no Businessmap não são afetados.</p>",
+      confirmLabel: "Limpar",
+      danger: true,
+    });
+    if (!ok) return;
+    state.days.forEach((d) => Object.assign(d, { intervals: [{ entry: "", exit: "" }], overtime: null, absence: null, source: "marcacoes" }));
+    $("#paste-input").value = "";
+    $("#paste-feedback").innerHTML = "";
+    renderDays();
+    saveDraft();
+  });
+
+  const list = $("#days-list");
+
+  list.addEventListener("input", (e) => {
+    const el = e.target;
+    if (!el.matches("[data-punch]")) return;
+    const day = state.days[Number(el.dataset.i)];
+    day.intervals[Number(el.dataset.j)][el.dataset.punch] = el.value;
+    updateDayMeta(Number(el.dataset.i));
+    saveDraft();
+  });
+
+  list.addEventListener("change", (e) => {
+    const el = e.target;
+    if (el.matches("[data-act='kind']")) {
+      const day = state.days[Number(el.dataset.i)];
+      day.override = el.value === "auto" ? null : el.value;
+      rerenderDay(Number(el.dataset.i));
+      saveDraft();
     }
-    day.overtime = parsed.overtime || "00:00";
-    day.absence = parsed.absence || "00:00";
-    calculateDayTotal(dayIndex);
-    filledCount++;
-    filledIndices.push(dayIndex);
-  }
+  });
 
-  if (filledCount > 0) {
-    renderDaysList();
-    highlightPastedRows(filledIndices);
-    showToast(`✅ ${filledCount} dia(s) preenchido(s) com sucesso!`, 'success');
-  } else {
-    showToast('⚠️ Nenhum dia correspondente encontrado.', 'error');
-  }
-  return filledCount;
-}
-
-function highlightPastedRows(indices) {
-  setTimeout(() => {
-    for (const idx of indices) {
-      const row = document.querySelector(`.day-row[data-index="${idx}"]`);
-      if (row) {
-        row.classList.add('paste-row-highlight');
-        const inputs = row.querySelectorAll('input[type="time"]');
-        inputs.forEach(input => { if (input.value) input.classList.add('paste-filled'); });
-        setTimeout(() => {
-          row.classList.remove('paste-row-highlight');
-          inputs.forEach(input => input.classList.remove('paste-filled'));
-        }, 1600);
-      }
+  list.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-act]");
+    if (!el || el.tagName === "SELECT") return;
+    const i = Number(el.dataset.i);
+    const day = state.days[i];
+    switch (el.dataset.act) {
+      case "add-interval":
+        day.intervals.push({ entry: "", exit: "" });
+        rerenderDay(i);
+        $(`#day-${i} .pair:last-child input`)?.focus();
+        break;
+      case "remove-interval":
+        if (day.intervals.length > 1) day.intervals.pop();
+        else day.intervals = [{ entry: "", exit: "" }];
+        rerenderDay(i);
+        break;
+      case "force-work":
+        day.override = "work";
+        rerenderDay(i);
+        break;
+      case "source":
+        day.source = el.dataset.source;
+        updateDayMeta(i);
+        break;
+      default:
+        return;
     }
-  }, 50);
+    saveDraft();
+  });
 }
 
-function handlePasteEvent(e) {
-  const activeTag = document.activeElement?.tagName?.toLowerCase();
-  if (['input', 'textarea', 'select'].includes(activeTag)) return;
-  if (state.days.length === 0 || elements.daysListSection.style.display === 'none') return;
-
-  const text = e.clipboardData?.getData('text/plain');
-  if (!text) return;
-
-  const hasDate = /\d{2}\/\d{2}\/\d{4}/.test(text);
-  const hasEntry = /entrada/i.test(text);
-  if (!hasDate || !hasEntry) return;
-
-  e.preventDefault();
-  const parsed = parsePastedTimesheet(text);
-  if (parsed.length === 0) { showToast('⚠️ Não foi possível reconhecer horários.', 'error'); return; }
-  applyPastedData(parsed);
-}
-
-async function handlePasteButtonClick() {
-  if (state.days.length === 0) { showToast('Gere a lista de dias primeiro.', 'error'); return; }
-  try {
-    const text = await navigator.clipboard.readText();
-    if (!text) { showToast('Área de transferência vazia.', 'error'); return; }
-    const parsed = parsePastedTimesheet(text);
-    if (parsed.length === 0) { showToast('⚠️ Não foi possível reconhecer horários.', 'error'); return; }
-    applyPastedData(parsed);
-  } catch (error) {
-    console.error('Erro ao acessar clipboard:', error);
-    showToast('Não foi possível acessar a área de transferência. Use Ctrl+V.', 'error');
+function applyPaste(text) {
+  const feedback = $("#paste-feedback");
+  const { days: parsed, warnings } = parseTimesheet(text);
+  if (!parsed.length) {
+    feedback.innerHTML = `<div class="alert alert-warn">${icon("alert")} Não reconheci batidas nesse texto. Copie o espelho de ponto incluindo as datas (dd/mm/aaaa).</div>`;
+    return;
   }
-}
 
-// ============ Exceções ============
+  const byIso = new Map(state.days.map((d, i) => [d.iso, i]));
+  let filled = 0;
+  const outside = [];
+  const forced = [];
 
-function isException(dateDisplay) { return state.exceptions.some((e) => e.date === dateDisplay); }
-
-function getExceptionType(dateDisplay) {
-  const typeNames = { ferias: "Férias", atestado: "Atestado", afastamento: "Afastamento", banco: "Banco de Horas", feriado_manual: "Feriado Manual" };
-  const exc = state.exceptions.find((e) => e.date === dateDisplay);
-  return exc ? typeNames[exc.type] : "";
-}
-
-function addException() {
-  const date = elements.exceptionDate.value;
-  const type = elements.exceptionType.value;
-  if (!date) { showToast("Selecione uma data", "error"); return; }
-  const dateDisplay = formatDateForAPI(date);
-  if (state.exceptions.some((e) => e.date === dateDisplay)) { showToast("Esta data já foi adicionada", "error"); return; }
-  state.exceptions.push({ date: dateDisplay, type });
-  renderExceptions();
-  if (state.days.length > 0) renderDaysList();
-  elements.exceptionDate.value = "";
-}
-
-function removeException(index) {
-  state.exceptions.splice(index, 1);
-  renderExceptions();
-  if (state.days.length > 0) renderDaysList();
-}
-
-function renderExceptions() {
-  const typeNames = { ferias: "Férias", atestado: "Atestado", afastamento: "Afastamento", banco: "Banco de Horas", feriado_manual: "Feriado Manual" };
-  elements.exceptionsList.innerHTML = state.exceptions
-    .map((exc, index) => `
-      <li>
-        <span>${exc.date} - ${typeNames[exc.type]}</span>
-        <button class="remove-exception" onclick="removeException(${index})">✕</button>
-      </li>
-    `)
-    .join("");
-}
-
-window.removeException = removeException;
-
-// ============ Submit Form ============
-
-async function handleSubmit(e) {
-  e.preventDefault();
-  // Impedir que o navegador bloqueie o submit por validação nativa do campo nome
-  // (o nome é opcional para análise — obrigatório apenas ao salvar no histórico)
-  e.stopImmediatePropagation();
-
-  state.colaborador = elements.colaboradorName.value.trim();
-
-  if (state.days.length === 0) { showToast("Gere a lista de dias primeiro", "error"); return; }
-
-  const results = [];
-  let totalWorkedHours = 0;
-  let workdaysCount = 0;
-  let ignoredCount = 0;
-
-  for (const day of state.days) {
-    const isNonWorkday = day.isWeekend || day.isHoliday || isException(day.dateDisplay);
-
-    if (isNonWorkday) {
-      const reason = day.isWeekend
-        ? "Final de Semana"
-        : day.isHoliday
-        ? `Feriado (${day.holidayName})`
-        : getExceptionType(day.dateDisplay);
-
-      results.push({
-        date: day.dateDisplay, day_of_week: day.dayName,
-        worked_time: "----", redmine_value: "----", day_type: reason,
-        status: "ignorado", status_description: reason,
-        css_class: "status-ignored", is_ignored: true,
-      });
-      ignoredCount++;
-    } else {
-      const workedTime = formatTotalHours(day.totalHours);
-      const redmineValue = hoursToRedmine(day.totalHours);
-      totalWorkedHours += day.totalHours;
-      workdaysCount++;
-
-      results.push({
-        date: day.dateDisplay, day_of_week: day.dayName,
-        worked_time: workedTime, redmine_value: redmineValue, day_type: day.activityType || "",
-        status: day.status,
-        status_description: day.status === "ok" ? "✔ Confere" : day.status === "divergent" ? "✘ Divergente" : "⏳ Pendente",
-        css_class: day.status === "ok" ? "status-ok" : day.status === "divergent" ? "status-divergent" : "",
-        is_ignored: false,
-      });
+  for (const p of parsed) {
+    const iso = brToIso(p.date);
+    const idx = byIso.get(iso);
+    if (idx === undefined) {
+      outside.push(iso);
+      continue;
     }
+    const day = state.days[idx];
+    day.intervals = p.intervals.length ? p.intervals.map((x) => ({ ...x })) : [{ entry: "", exit: "" }];
+    day.overtime = p.overtime;
+    day.absence = p.absence;
+    day.source = "marcacoes";
+    const hasPunches = p.intervals.some((x) => x.entry || x.exit);
+    if (hasPunches && !dayStatus(day).workday && !day.override) {
+      day.override = "work";
+      forced.push(iso);
+    }
+    filled++;
   }
 
-  state.results = {
-    days: results,
-    summary: {
-      total_days: state.days.length,
-      workdays_analyzed: workdaysCount,
-      days_ignored: ignoredCount,
-      total_worked_hours: totalWorkedHours,
-      total_worked_display: `${totalWorkedHours.toFixed(2)}h`,
-    },
-  };
-
-  renderResults(state.results);
-  elements.resultsSection.style.display = "block";
-
-  // Mostrar confirmação de salvamento
-  if (elements.saveConfirmation) {
-    elements.saveConfirmation.style.display = "block";
-    elements.saveConfirmation.classList.add("animate-in");
+  const parts = [];
+  if (filled) parts.push(`<div class="alert alert-ok">${icon("check")} ${filled} dia(s) preenchido(s) a partir do texto colado.</div>`);
+  if (forced.length) parts.push(`<div class="alert alert-info">${icon("alert")} Havia batidas em fim de semana/feriado (${forced.map(shortDate).join(", ")}); esses dias foram marcados como trabalhados.</div>`);
+  if (outside.length) {
+    outside.sort();
+    const first = [...parsed.map((p) => brToIso(p.date)), state.start].sort()[0];
+    const last = [...parsed.map((p) => brToIso(p.date)), state.end].sort().slice(-1)[0];
+    parts.push(`<div class="alert alert-warn">${icon("alert")}<div>${outside.length} dia(s) do texto estão fora do período (${outside.slice(0, 5).map(shortDate).join(", ")}${outside.length > 5 ? "…" : ""}).
+      <button type="button" class="btn btn-ghost btn-sm" id="expand-period" data-start="${first}" data-end="${last}">Ajustar período para ${isoToBr(first)} – ${isoToBr(last)}</button></div></div>`);
   }
+  if (warnings.length) {
+    parts.push(`<details class="alert alert-warn"><summary>${icon("alert")} ${warnings.length} aviso(s) na leitura</summary><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>`);
+  }
+  feedback.innerHTML = parts.join("");
 
-  elements.resultsSection.scrollIntoView({ behavior: "smooth" });
-  showToast(state.colaborador ? `Análise concluída, ${state.colaborador}!` : "Análise concluída!", "success");
+  $("#expand-period")?.addEventListener("click", async (e) => {
+    const { start, end } = e.currentTarget.dataset;
+    $("#start-date").value = start;
+    $("#end-date").value = end;
+    await buildPeriod(start, end, state.uf);
+    applyPaste(text);
+  });
+
+  renderDays();
+  saveDraft();
+  if (filled) toast(`${filled} dia(s) preenchido(s).`, "success");
 }
 
-// ============ Render Results ============
-
-function renderResults(data) {
-  renderSummary(data.summary);
-  renderTable(data.days);
+function kindSelect(day, i) {
+  const st = dayStatus({ ...day, override: null });
+  const options = [
+    ["auto", `Automático (${st.workday ? "dia útil" : st.label.toLowerCase()})`],
+    ["work", "Dia trabalhado"],
+    ...Object.entries(DAY_KINDS),
+  ];
+  const current = day.override || "auto";
+  return `
+    <label class="sr-only" for="kind-${i}">Situação do dia ${isoToBr(day.iso)}</label>
+    <select id="kind-${i}" class="select-sm" data-act="kind" data-i="${i}">
+      ${options.map(([v, l]) => `<option value="${v}" ${v === current ? "selected" : ""}>${esc(l)}</option>`).join("")}
+    </select>`;
 }
 
-function renderSummary(summary) {
-  elements.summaryCards.innerHTML = `
-    <div class="summary-card">
-      <div class="value">${summary.total_days}</div>
-      <div class="label">Total de Dias</div>
-    </div>
-    <div class="summary-card">
-      <div class="value">${summary.workdays_analyzed}</div>
-      <div class="label">Dias Úteis</div>
-    </div>
-    <div class="summary-card ignored">
-      <div class="value">${summary.days_ignored}</div>
-      <div class="label">Ignorados</div>
-    </div>
-    <div class="summary-card">
-      <div class="value">${summary.total_worked_display}</div>
-      <div class="label">Total Horas</div>
-    </div>
+function dayMetaHtml(day, i) {
+  const st = dayStatus(day);
+  if (!st.workday) return "";
+  const calc = dayCalc(day);
+  const total = chooseDayTotal(calc, day.source);
+  const warn = calc.warnings.filter((w) => w.code !== "no_punches");
+  const diverge = calc.formulaMinutes !== null && calc.divergenceMinutes !== 0;
+
+  return `
+    <div class="day-total ${total ? "" : "is-empty"}">${total ? minutesToHHMM(total) : "--:--"}</div>
+    ${warn.length ? `<ul class="day-warnings">${warn.map((w) => `<li>${icon("alert")} ${esc(w.message)}</li>`).join("")}</ul>` : ""}
+    ${diverge ? `
+      <div class="diverge" role="group" aria-label="Valor oficial do dia">
+        <span class="diverge-text">${icon("alert")} As batidas (${minutesToHHMM(calc.workedMinutes)}) diferem do ponto (${minutesToHHMM(calc.formulaMinutes)} = jornada ${settings.journey} ${day.overtime ? `+ HE ${esc(day.overtime)}` : ""} ${day.absence ? `− AUS ${esc(day.absence)}` : ""}).</span>
+        <div class="segmented segmented-sm">
+          <button type="button" class="${day.source === "marcacoes" ? "is-active" : ""}" data-act="source" data-source="marcacoes" data-i="${i}">Usar batidas</button>
+          <button type="button" class="${day.source === "ponto" ? "is-active" : ""}" data-act="source" data-source="ponto" data-i="${i}">Usar ponto</button>
+        </div>
+      </div>` : ""}
+    ${day.overtime || day.absence ? `<div class="day-balance muted small">${day.overtime ? `HE ${esc(day.overtime)}` : ""}${day.overtime && day.absence ? " · " : ""}${day.absence ? `AUS ${esc(day.absence)}` : ""}</div>` : ""}
   `;
 }
 
-function renderTable(days) {
-  elements.resultsBody.innerHTML = days
-    .map(
-      (day, index) => `
-        <tr class="${day.css_class}" data-index="${index}">
-          <td>${day.date}</td>
-          <td>${day.day_of_week}</td>
-          <td>${day.worked_time}</td>
-          <td>
-            ${!day.is_ignored
-              ? `<span class="redmine-value-cell">
-                  <strong>${day.redmine_value}</strong>
-                  <button type="button" class="btn-copy-value" onclick="copyRedmineValue(${index})" title="Copiar valor para lançar no Redmine">📋</button>
-                </span>`
-              : `<strong>${day.redmine_value}</strong>`
-            }
-          </td>
-          <td>
-            ${!day.is_ignored
-              ? `<select class="tipo-select ${day.day_type ? 'tipo-' + normalizeTipo(day.day_type) : ''}" onchange="setDayType(${index}, this.value)" title="Tipo de atividade no Redmine">
-                  <option value="">Selecionar…</option>
-                  ${ACTIVITY_TYPES.map((t) => `<option value="${t}" ${day.day_type === t ? "selected" : ""}>${t}</option>`).join("")}
-                </select>`
-              : `${day.day_type || "—"}`
-            }
-          </td>
-          <td>
-            ${!day.is_ignored
-              ? `<div class="status-selector">
-                  <button onclick="setStatus(${index}, 'ok')" class="${day.status === 'ok' ? 'active-ok' : ''}" title="Confere">✔</button>
-                  <button onclick="setStatus(${index}, 'divergent')" class="${day.status === 'divergent' ? 'active-divergent' : ''}" title="Divergente">✘</button>
-                  <button onclick="setStatus(${index}, 'pending')" class="${day.status === 'pending' ? 'active-pending' : ''}" title="Pendente">⏳</button>
-                </div>`
-              : `<span class="status-badge">📅 Ignorado</span>`
-            }
-          </td>
-        </tr>
-      `,
-    )
-    .join("");
-}
+function dayHtml(day, i) {
+  const st = dayStatus(day);
+  const dateCol = `
+    <div class="day-date">
+      <strong>${shortDate(day.iso)}</strong>
+      <span>${weekdayShort(day.iso)}</span>
+    </div>`;
 
-function setDayType(index, tipo) {
-  if (!state.results) return;
-  const resultDay = state.results.days[index];
-  if (resultDay.is_ignored) return;
-
-  resultDay.day_type = tipo;
-  const originalDay = state.days.find((d) => d.dateDisplay === resultDay.date);
-  if (originalDay) originalDay.activityType = tipo;
-
-  // Atualizar diretamente a célula do tipo na linha correspondente para feedback imediato
-  updateTipoCellInDOM(index, tipo);
-}
-
-function setAllDayTypes(tipo) {
-  if (!state.results) return;
-  let count = 0;
-  state.results.days.forEach((resultDay, idx) => {
-    if (resultDay.is_ignored) return;
-    resultDay.day_type = tipo;
-    const originalDay = state.days.find((d) => d.dateDisplay === resultDay.date);
-    if (originalDay) originalDay.activityType = tipo;
-    count++;
-    // Atualizar cada dropdown individual na tabela
-    updateTipoCellInDOM(idx, tipo);
-  });
-  showToast(`🏷️ Tipo "${tipo}" aplicado a ${count} dia(s)`, "success");
-}
-
-/**
- * Atualiza diretamente o dropdown de tipo na linha da tabela de resultados,
- * sem re-renderizar toda a tabela (garante feedback visual imediato).
- */
-function updateTipoCellInDOM(index, tipo) {
-  const row = elements.resultsBody.querySelector(`tr[data-index="${index}"]`);
-  if (!row) return;
-  const select = row.querySelector('select.tipo-select');
-  if (select) {
-    select.value = tipo;
-    // Atualizar classes CSS de estilo do dropdown
-    select.className = `tipo-select ${tipo ? 'tipo-' + normalizeTipo(tipo) : ''}`;
+  if (!st.workday) {
+    return `
+      <article class="day is-off" id="day-${i}">
+        ${dateCol}
+        <div class="day-body">
+          <span class="badge">${esc(st.label)}</span>
+          ${day.weekend || day.holiday ? `<button type="button" class="btn btn-ghost btn-sm" data-act="force-work" data-i="${i}">Trabalhei neste dia</button>` : ""}
+        </div>
+        <div class="day-side">${kindSelect(day, i)}</div>
+      </article>`;
   }
+
+  const pairs = day.intervals.map((iv, j) => `
+    <div class="pair">
+      <input type="time" class="time" value="${esc(iv.entry)}" data-punch="entry" data-i="${i}" data-j="${j}" aria-label="Entrada ${j + 1} de ${isoToBr(day.iso)}" />
+      <span class="pair-sep" aria-hidden="true">–</span>
+      <input type="time" class="time" value="${esc(iv.exit)}" data-punch="exit" data-i="${i}" data-j="${j}" aria-label="Saída ${j + 1} de ${isoToBr(day.iso)}" />
+    </div>`).join("");
+
+  return `
+    <article class="day" id="day-${i}">
+      ${dateCol}
+      <div class="day-body">
+        <div class="pairs">${pairs}
+          <div class="pair-actions">
+            <button type="button" class="btn-icon btn-icon-sm" data-act="add-interval" data-i="${i}" aria-label="Adicionar intervalo" title="Adicionar intervalo">${icon("plus")}</button>
+            <button type="button" class="btn-icon btn-icon-sm" data-act="remove-interval" data-i="${i}" aria-label="Remover último intervalo" title="Remover último intervalo">${icon("minus")}</button>
+          </div>
+        </div>
+        ${day.override === "work" && (day.weekend || day.holiday) ? `<span class="badge badge-info">${esc(st.label)}</span>` : ""}
+      </div>
+      <div class="day-side">
+        <div class="day-meta" id="day-meta-${i}">${dayMetaHtml(day, i)}</div>
+        ${kindSelect(day, i)}
+      </div>
+    </article>`;
 }
 
-async function copyRedmineValue(index) {
-  if (!state.results) return;
-  const value = state.results.days[index]?.redmine_value;
-  if (!value || value === "----") return;
-  try {
-    await navigator.clipboard.writeText(value);
-    showToast(`📋 "${value}" copiado!`, "success");
-  } catch {
-    showToast("Não foi possível copiar. Selecione e copie manualmente.", "error");
-  }
+function renderDays() {
+  const s = parseISODateLocal(state.start);
+  $("#period-label").textContent = s
+    ? `${isoToBr(state.start)} a ${isoToBr(state.end)} · ${state.uf} · ${state.days.filter((d) => dayStatus(d).workday).length} dia(s) útil(eis)`
+    : "";
+  $("#days-list").innerHTML = state.days.map(dayHtml).join("");
+  updatePeriodTotal();
 }
 
-window.setDayType = setDayType;
-window.copyRedmineValue = copyRedmineValue;
-
-function setStatus(index, status) {
-  if (!state.results) return;
-  const resultDay = state.results.days[index];
-  if (resultDay.is_ignored) return;
-
-  const originalDay = state.days.find((d) => d.dateDisplay === resultDay.date);
-  if (originalDay) originalDay.status = status;
-
-  resultDay.status = status;
-  resultDay.status_description = status === "ok" ? "✔ Confere" : status === "divergent" ? "✘ Divergente" : "⏳ Pendente";
-  resultDay.css_class = status === "ok" ? "status-ok" : status === "divergent" ? "status-divergent" : "";
-  renderTable(state.results.days);
+function rerenderDay(i) {
+  const el = $(`#day-${i}`);
+  if (el) el.outerHTML = dayHtml(state.days[i], i);
+  updatePeriodTotal();
 }
 
-window.setStatus = setStatus;
+function updateDayMeta(i) {
+  const el = $(`#day-meta-${i}`);
+  if (el) el.innerHTML = dayMetaHtml(state.days[i], i);
+  updatePeriodTotal();
+}
 
-// ============ Salvar no Histórico ============
+function updatePeriodTotal() {
+  const total = state.days.reduce((a, d) => a + dayTotal(d), 0);
+  $("#period-total").textContent = minutesToHHMM(total);
+}
 
-async function saveToHistory() {
-  // Sempre reler o colaborador do campo de input para garantir valor atual
-  const colaborador = elements.colaboradorName.value.trim() || state.colaborador;
-  if (!colaborador) { showToast("Informe seu nome antes de salvar", "error"); elements.colaboradorName.focus(); return; }
+// ============ Passo 3: resultado ============
 
-  if (state.days.length === 0) { showToast("Nenhum apontamento para salvar. Gere a lista de dias primeiro.", "error"); return; }
-
-  const dias = state.days.map((day) => {
-    const isNonWorkday = day.isWeekend || day.isHoliday || isException(day.dateDisplay);
-    return {
-      date: day.dateDisplay,
-      day_name: day.dayName,
-      intervals: day.intervals.map((iv) => ({
-        entry: iv.entry || "",
-        exit: iv.exit || "",
-      })),
-      overtime: day.overtime || "00:00",
-      absence: day.absence || "00:00",
-      activity_type: day.activityType || "",
-      total_hours: day.totalHours || 0,
-      is_ignored: isNonWorkday,
-      ignore_reason: isNonWorkday
-        ? day.isWeekend ? "Final de Semana"
-        : day.isHoliday ? `Feriado (${day.holidayName})`
-        : getExceptionType(day.dateDisplay)
-        : "",
-    };
+function bindResult() {
+  $("#result-list").addEventListener("click", (e) => {
+    const el = e.target.closest("[data-act='launch-day']");
+    if (el) startLaunch([Number(el.dataset.i)]);
   });
 
-  const totalHoras = state.results?.summary?.total_worked_hours || 0;
-  const periodoInicio = state.days[0]?.dateDisplay || "";
-  const periodoFim = state.days[state.days.length - 1]?.dateDisplay || "";
+  $("#result-list").addEventListener("change", (e) => {
+    const el = e.target;
+    if (!el.matches("[data-act='tipo']")) return;
+    state.days[Number(el.dataset.i)].tipo = el.value;
+    saveDraft();
+  });
 
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const criadoEm = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  $("#tipo-all").addEventListener("change", (e) => {
+    const tipo = e.target.value;
+    state.days.forEach((d) => { if (dayStatus(d).workday) d.tipo = tipo; });
+    renderResult();
+    saveDraft();
+  });
 
-  const record = {
-    uuid: generateUUID(),
-    colaborador,
-    periodo_inicio: periodoInicio,
-    periodo_fim: periodoFim,
-    total_horas: totalHoras,
-    criado_em: criadoEm,
-    dias,
-    synced: false,
-    server_id: null,
-  };
+  $("#launch-pending").addEventListener("click", () => {
+    const idx = state.days.map((d, i) => (dayStatus(d).workday && pendingMinutes(d) > 0 ? i : -1)).filter((i) => i >= 0);
+    if (!idx.length) return toast("Não há dias com horas pendentes.", "info");
+    startLaunch(idx);
+  });
 
-  // 1) Salvar no navegador primeiro — garantido mesmo se o servidor estiver fora
-  upsertLocalRecord(record);
+  $("#export-btn").addEventListener("click", exportExcel);
+}
 
-  // 2) Sincronizar com o servidor (best-effort)
-  showLoading(true);
-  try {
-    const response = await apiCall("/api/salvar-apontamento", "POST", {
-      uuid: record.uuid,
-      colaborador,
-      periodo_inicio: periodoInicio,
-      periodo_fim: periodoFim,
-      total_horas: totalHoras,
-      criado_em: criadoEm,
-      dias,
+function renderResult() {
+  const work = state.days.filter((d) => dayStatus(d).workday);
+  const total = work.reduce((a, d) => a + dayTotal(d), 0);
+  const launched = work.reduce((a, d) => a + Math.min(launchedMinutes(d), dayTotal(d)), 0);
+  const pendingDays = work.filter((d) => pendingMinutes(d) > 0).length;
+
+  $("#summary").innerHTML = `
+    <div class="stat"><span class="stat-label">Dias úteis</span><strong class="stat-value">${work.length}</strong></div>
+    <div class="stat"><span class="stat-label">Total trabalhado</span><strong class="stat-value">${minutesToHHMM(total)}</strong><span class="stat-sub">${minutesToDecimal(total)} h</span></div>
+    <div class="stat"><span class="stat-label">Lançado</span><strong class="stat-value">${minutesToHHMM(launched)}</strong><span class="stat-sub">${total ? Math.round((launched / total) * 100) : 0}% do total</span></div>
+    <div class="stat"><span class="stat-label">Dias pendentes</span><strong class="stat-value">${pendingDays}</strong></div>
+  `;
+
+  $("#launch-pending").disabled = pendingDays === 0;
+
+  $("#result-list").innerHTML = state.days.map((day, i) => {
+    const st = dayStatus(day);
+    const dateCol = `<div class="day-date"><strong>${shortDate(day.iso)}</strong><span>${weekdayShort(day.iso)}</span></div>`;
+    if (!st.workday) {
+      return `<article class="result-row is-off">${dateCol}<span class="muted">${esc(st.label)}</span></article>`;
+    }
+    const total = dayTotal(day);
+    const ls = launchState(day);
+    const statusChip = {
+      empty: `<span class="status status-empty">Sem horas</span>`,
+      pending: `<span class="status status-pending">Pendente</span>`,
+      partial: `<span class="status status-partial">Parcial · falta ${minutesToHHMM(pendingMinutes(day))}</span>`,
+      done: `<span class="status status-done">${icon("check")} Lançado</span>`,
+    }[ls];
+
+    return `
+      <article class="result-row is-${ls}">
+        ${dateCol}
+        <button type="button" class="hours-btn" data-act="launch-day" data-i="${i}" ${total ? "" : "disabled"} aria-label="Lançar ${minutesToHHMM(pendingMinutes(day) || total)} de ${isoToBr(day.iso)} no Businessmap">
+          <strong>${total ? minutesToHHMM(total) : "--:--"}</strong>
+          <span>${total ? `${minutesToDecimal(total)} h` : ""}</span>
+          ${total && ls !== "done" ? `<span class="hours-cta">${icon("send")} Lançar</span>` : ""}
+        </button>
+        <div class="result-info">
+          ${statusChip}
+          ${day.launched.length ? `<ul class="launched">${day.launched.map((l) => `<li><span>${esc(l.label)}</span><span>${minutesToHHMM(l.minutes)}</span></li>`).join("")}</ul>` : ""}
+        </div>
+        <div class="result-tipo">
+          <label class="sr-only" for="tipo-${i}">Tipo de atividade em ${isoToBr(day.iso)}</label>
+          <select id="tipo-${i}" class="select-sm" data-act="tipo" data-i="${i}">
+            <option value="">Tipo…</option>
+            ${TIPOS.map((t) => `<option ${day.tipo === t ? "selected" : ""}>${t}</option>`).join("")}
+          </select>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+async function startLaunch(indexes) {
+  if (!getApiKey()) {
+    toast("Configure sua API Key do Businessmap para lançar as horas.", "info", 5000);
+    openSettings();
+    return;
+  }
+
+  const toLaunch = indexes
+    .map((i) => state.days[i])
+    .map((d) => ({ iso: d.iso, minutes: pendingMinutes(d), tipo: d.tipo }))
+    .filter((d) => d.minutes > 0);
+
+  if (!toLaunch.length) {
+    // Dia já lançado: permite lançar de novo o total (o diálogo avisa sobre duplicidade).
+    const d = state.days[indexes[0]];
+    const ok = await confirmDialog({
+      title: "Dia já lançado",
+      message: `<p>As horas de <strong>${isoToBr(d.iso)}</strong> já foram lançadas por aqui. Deseja lançar novamente?</p>`,
+      confirmLabel: "Lançar novamente",
     });
-    const data = await response.json();
-    record.synced = true;
-    record.server_id = data.id;
-    upsertLocalRecord(record);
-    showToast("✅ Apontamento salvo e sincronizado!", "success");
-  } catch (error) {
-    console.warn("Servidor indisponível, registro guardado localmente:", error);
-    showToast("💾 Salvo no navegador! Será sincronizado quando o servidor acordar.", "success");
-  } finally {
-    showLoading(false);
+    if (!ok) return;
+    toLaunch.push({ iso: d.iso, minutes: dayTotal(d), tipo: d.tipo });
   }
 
-  // Esconder bloco de confirmação após salvar
-  if (elements.saveConfirmation) {
-    elements.saveConfirmation.style.opacity = "0";
-    setTimeout(() => { elements.saveConfirmation.style.display = "none"; }, 400);
-  }
-
-  // Carregar e mostrar o histórico
-  await loadHistory();
-  elements.historySection.style.display = "block";
-  elements.historySection.scrollIntoView({ behavior: "smooth" });
+  const selected = new Set(toLaunch.map((d) => d.iso));
+  openLaunch(toLaunch, {
+    otherPending: () =>
+      state.days
+        .filter((d) => dayStatus(d).workday && !selected.has(d.iso) && pendingMinutes(d) > 0)
+        .map((d) => ({ iso: d.iso, minutes: pendingMinutes(d), tipo: d.tipo })),
+    onLaunched: (created, items) => {
+      items.forEach((it, k) => {
+        const day = state.days.find((d) => d.iso === it.iso);
+        if (!day) return;
+        const id = it.card.custom_id || `#${it.card.card_id}`;
+        day.launched.push({
+          card_id: it.card.card_id,
+          subtask_id: it.subtask?.subtask_id || null,
+          logged_time_id: created[k]?.logged_time_id || null,
+          minutes: it.minutes,
+          label: `${id} · ${it.card.title || ""}${it.subtask ? ` › ${it.subtask.description}` : ""}`,
+        });
+      });
+      saveDraft();
+      renderResult();
+      toast("Horas lançadas no Businessmap.", "success");
+    },
+  });
 }
 
-// ============ Histórico ============
+// ============ Conferência ↔ Apontar ============
 
-// Impede que cargas simultâneas do histórico se empilhem (cada uma disparava
-// uma sincronização, o que podia gerar registros duplicados no servidor).
-let historyLoading = false;
-
-async function loadHistory() {
-  if (historyLoading) return;
-  historyLoading = true;
-
-  try {
-    const colaborador = elements.filterColaborador?.value?.trim() || "";
-    const mes = elements.filterMes?.value || "";
-    const applyFilters = (records) =>
-      records.filter((rec) => matchesHistoryFilters(rec, colaborador, mes));
-
-    const render = (localRecords, serverRecords, serverOk) => {
-      const filtered = applyFilters(mergeHistory(localRecords, serverRecords));
-      state.historyRecords = filtered;
-      renderHistoryCards(filtered, serverOk);
-    };
-
-    // Buscar do servidor (best-effort — o histórico local funciona offline)
-    let serverRecords = [];
-    let serverOk = false;
-    try {
-      const response = await apiCall("/api/historico");
-      const data = await response.json();
-      serverRecords = data.registros || [];
-      serverOk = true;
-    } catch (error) {
-      console.warn("Servidor indisponível — exibindo histórico local:", error);
-    }
-
-    render(getLocalHistory(), serverRecords, serverOk);
-
-    elements.historySection.style.display = "block";
-    // Ocultar botão flutuante quando o histórico está visível
-    const floatBtn = document.getElementById("float-history-btn");
-    if (floatBtn) floatBtn.style.display = "none";
-
-    // Reenviar registros locais que o servidor perdeu.
-    // Re-renderiza a partir do estado local — NUNCA chama loadHistory() de novo
-    // (a recursão criava um novo registro no servidor a cada volta).
-    if (serverOk) {
-      const resynced = await syncLocalToServer(getLocalHistory(), serverRecords);
-      if (resynced > 0) render(getLocalHistory(), serverRecords, true);
-    }
-  } finally {
-    historyLoading = false;
-  }
+/** Total trabalhado do dia, se ele estiver no período em apuração. */
+function workedMinutes(iso) {
+  const day = state.days.find((d) => d.iso === iso);
+  if (!day || !dayStatus(day).workday) return null;
+  return dayTotal(day) || null;
 }
 
-function mergeHistory(localRecords, serverRecords) {
-  const merged = localRecords.map((r) => ({ ...r }));
-  const byUuid = new Map(merged.map((r) => [r.uuid, r]));
-  const byFingerprint = new Map(merged.map((r) => [recordFingerprint(r), r]));
-  const deleted = new Set(getDeletedUuids());
-
-  for (const s of serverRecords) {
-    if (s.uuid && deleted.has(s.uuid)) continue; // excluído aqui, pendente no servidor
-    // Casar por uuid ou, se o servidor não o devolver, pelo conteúdo
-    const local = (s.uuid && byUuid.get(s.uuid)) || byFingerprint.get(recordFingerprint(s));
-    if (local) {
-      local.synced = true;
-      local.server_id = s.id;
-    } else {
-      // Registro que existe apenas no servidor (ex.: salvo em outro navegador)
-      merged.push({
-        uuid: s.uuid || `srv-${s.id}`,
-        server_id: s.id,
-        colaborador: s.colaborador,
-        periodo_inicio: s.periodo_inicio,
-        periodo_fim: s.periodo_fim,
-        total_horas: s.total_horas,
-        criado_em: s.criado_em,
-        synced: true,
-        serverOnly: true,
+/** Mantém `day.launched` coerente com edições feitas na Conferência. */
+function syncLaunched(change) {
+  const { type, oldId, entry } = change;
+  if (type === "update") {
+    // Tempo e/ou data podem ter mudado: tira do dia antigo e põe no dia novo.
+    let item = null;
+    state.days.forEach((d) => {
+      const found = d.launched.find((l) => l.logged_time_id === oldId);
+      if (found) item = found;
+      d.launched = d.launched.filter((l) => l.logged_time_id !== oldId);
+    });
+    if (item) {
+      item.minutes = entry.minutes;
+      state.days.find((d) => d.iso === entry.date)?.launched.push(item);
+    }
+    saveDraft();
+    return;
+  }
+  if (type !== "create") {
+    state.days.forEach((d) => {
+      d.launched = d.launched.filter((l) => l.logged_time_id !== oldId);
+    });
+  }
+  if (type === "recreate" || type === "create") {
+    const day = state.days.find((d) => d.iso === entry.date);
+    if (day) {
+      day.launched.push({
+        card_id: entry.card_id,
+        subtask_id: entry.subtask_id || null,
+        logged_time_id: entry.logged_time_id,
+        minutes: entry.minutes,
+        label: `${entry.custom_id || `#${entry.card_id}`} · ${entry.card_title || ""}${entry.subtask_id ? ` › ${entry.subtask_description || entry.subtask_id}` : ""}`,
       });
     }
   }
-
-  merged.sort((a, b) => parseCreatedAt(b.criado_em) - parseCreatedAt(a.criado_em));
-  return merged;
+  saveDraft();
 }
 
-function matchesHistoryFilters(rec, colaborador, mes) {
-  if (colaborador && !(rec.colaborador || "").toLowerCase().includes(colaborador.toLowerCase())) {
-    return false;
-  }
-  if (mes) {
-    const [year, month] = mes.split("-");
-    const suffix = `/${month}/${year}`;
-    const inicio = rec.periodo_inicio || "";
-    const fim = rec.periodo_fim || "";
-    if (!inicio.endsWith(suffix) && !fim.endsWith(suffix)) return false;
-  }
-  return true;
-}
-
-// Guardas contra reenvio em loop: uma sincronização por vez e, no máximo, uma
-// tentativa de envio por registro em cada sessão. Se o servidor não reconhecer
-// o registro (ex.: versão antiga que não devolve o uuid), o pior caso passa a
-// ser uma tentativa inútil — e não uma cadeia infinita de novos registros.
-let syncRunning = false;
-const syncAttempted = new Set();
-
-/**
- * Reenvia ao servidor os registros que existem apenas no navegador.
- * É assim que o histórico "renasce" depois que o Render free tier reinicia.
- * Retorna quantos registros foram reenviados.
- */
-async function syncLocalToServer(localRecords, serverRecords) {
-  if (syncRunning) return 0;
-  syncRunning = true;
-
-  const serverUuids = new Set(serverRecords.map((r) => r.uuid).filter(Boolean));
-  const serverFingerprints = new Set(serverRecords.map(recordFingerprint));
-  let resynced = 0;
-
+async function exportExcel() {
+  const days = state.days.map((d) => {
+    const st = dayStatus(d);
+    const total = dayTotal(d);
+    const punches = d.intervals.filter((x) => x.entry || x.exit).map((x) => `${x.entry || "?"}–${x.exit || "?"}`).join("  ");
+    return {
+      date: isoToBr(d.iso),
+      day_of_week: WEEKDAYS[weekdayIndex(d.iso)],
+      punches: st.workday ? punches : "",
+      total_hhmm: st.workday ? minutesToHHMM(total) : "",
+      total_decimal: st.workday ? minutesToDecimal(total) : "",
+      tipo: st.workday ? d.tipo : "",
+      cards: d.launched.map((l) => `${l.label} (${minutesToHHMM(l.minutes)})`).join("\n"),
+      status: !st.workday ? st.label : { empty: "Sem horas", pending: "Pendente", partial: "Parcial", done: "Lançado" }[launchState(d)],
+      ignored: !st.workday,
+    };
+  });
+  const total = state.days.reduce((a, d) => a + dayTotal(d), 0);
   try {
-    // Concluir exclusões pendentes no servidor
-    for (const deletedUuid of getDeletedUuids()) {
-      const serverRec = serverRecords.find((r) => r.uuid === deletedUuid);
-      if (!serverRec) {
-        clearDeletedUuid(deletedUuid); // já não existe no servidor
-        continue;
-      }
-      try {
-        await apiCall(`/api/historico/${serverRec.id}`, "DELETE");
-        clearDeletedUuid(deletedUuid);
-      } catch {
-        break; // servidor fora — tenta na próxima
-      }
-    }
-
-    for (const rec of localRecords) {
-      const alreadyOnServer =
-        serverUuids.has(rec.uuid) || serverFingerprints.has(recordFingerprint(rec));
-
-      if (alreadyOnServer) {
-        if (!rec.synced) {
-          rec.synced = true;
-          upsertLocalRecord(rec);
-        }
-        continue;
-      }
-      if (!rec.dias) continue;   // sem detalhes não há o que reenviar
-      if (!rec.uuid) continue;   // sem uuid o servidor não consegue evitar duplicata
-      if (syncAttempted.has(rec.uuid)) continue; // já tentado nesta sessão
-
-      syncAttempted.add(rec.uuid);
-      try {
-        const response = await apiCall("/api/salvar-apontamento", "POST", {
-          uuid: rec.uuid,
-          colaborador: rec.colaborador,
-          periodo_inicio: rec.periodo_inicio,
-          periodo_fim: rec.periodo_fim,
-          total_horas: rec.total_horas || 0,
-          criado_em: rec.criado_em,
-          dias: rec.dias,
-        });
-        const data = await response.json();
-        rec.synced = true;
-        rec.server_id = data.id;
-        upsertLocalRecord(rec);
-        resynced++;
-      } catch (error) {
-        console.warn("Falha ao re-sincronizar registro:", rec.uuid, error);
-        syncAttempted.delete(rec.uuid); // falha de rede pode ser tentada de novo
-        break; // servidor provavelmente fora — tenta de novo na próxima carga
-      }
-    }
-  } finally {
-    syncRunning = false;
+    const response = await withLoading("Gerando planilha…", () =>
+      api.exportExcel({ days, summary: { total_hhmm: minutesToHHMM(total), total_decimal: minutesToDecimal(total) } }),
+    );
+    downloadBlob(await response.blob(), `apontamento_${state.start}_${state.end}.xlsx`);
+    toast("Planilha exportada.", "success");
+  } catch (e) {
+    toast(e.message || "Erro ao exportar.", "error");
   }
-
-  if (resynced > 0) {
-    console.info(`[Sync] ${resynced} registro(s) re-sincronizado(s) com o servidor.`);
-  }
-  return resynced;
 }
 
-function renderHistoryCards(records, serverOk = true) {
-  if (!elements.historyList) return;
+// ============ Configurações ============
 
-  if (records.length === 0) {
-    elements.historyList.innerHTML = `
-      <div class="history-empty">
-        <span>📭</span>
-        <p>Nenhum registro encontrado.</p>
-        ${!serverOk ? `<p class="history-offline-note">⚠️ Servidor indisponível no momento — exibindo apenas o histórico deste navegador.</p>` : ""}
-      </div>
-    `;
+function openSettings() {
+  $("#api-key").value = getApiKey();
+  $("#api-key").type = "password";
+  $("#pref-journey").value = settings.journey;
+  $("#pref-theme").value = settings.theme;
+  renderConnStatus();
+  openDialog($("#settings-dialog"));
+}
+
+function renderConnStatus(message, kind) {
+  const el = $("#conn-status");
+  if (message) {
+    el.className = `conn-status is-${kind}`;
+    el.textContent = message;
     return;
   }
-
-  const offlineNote = !serverOk
-    ? `<p class="history-offline-note">⚠️ Servidor indisponível — exibindo o histórico salvo neste navegador. A sincronização será retomada automaticamente.</p>`
-    : "";
-
-  elements.historyList.innerHTML = offlineNote + records
-    .map((rec) => {
-      const syncBadge = rec.synced
-        ? `<span class="sync-badge synced" title="Sincronizado com o servidor">☁️ Sincronizado</span>`
-        : `<span class="sync-badge local" title="Salvo apenas neste navegador — será sincronizado automaticamente quando o servidor estiver disponível">💾 Local</span>`;
-
-      return `
-        <div class="history-card" data-uuid="${rec.uuid}">
-          <div class="history-card-main">
-            <div class="history-card-person">
-              <span class="history-person-icon">👤</span>
-              <div class="history-person-info">
-                <strong>${rec.colaborador}</strong>
-                ${syncBadge}
-              </div>
-            </div>
-            <div class="history-card-period">
-              <span class="history-period-label">📅 Período:</span>
-              <span>${rec.periodo_inicio} → ${rec.periodo_fim}</span>
-            </div>
-            <div class="history-card-total">
-              <span class="history-total-label">⏱️ Total Horas:</span>
-              <strong class="history-total-value">${(rec.total_horas || 0).toFixed(2)}h</strong>
-            </div>
-            <div class="history-card-date">
-              <span class="history-date-label">🕐 Salvo em:</span>
-              <span class="history-date-value">${rec.criado_em}</span>
-            </div>
-          </div>
-          <div class="history-card-actions">
-            <button
-              class="btn-view-detail"
-              onclick="viewHistoryDetail('${rec.uuid}')"
-              title="Ver detalhes das atividades"
-            >👁️</button>
-            <button
-              class="btn-delete-history"
-              onclick="deleteHistoryRecord('${rec.uuid}')"
-              title="Excluir este registro"
-            >🗑️</button>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-async function deleteHistoryRecord(uuid) {
-  if (!confirm("Deseja realmente excluir este registro do histórico?")) return;
-
-  const rec = (state.historyRecords || []).find((r) => r.uuid === uuid);
-
-  // Remover do navegador e marcar lápide (impede "ressurreição" na sincronização)
-  removeLocalRecord(uuid);
-  addDeletedUuid(uuid);
-
-  // Remover do servidor (best-effort; se falhar, a lápide tenta de novo depois)
-  if (rec?.server_id) {
-    try {
-      await apiCall(`/api/historico/${rec.server_id}`, "DELETE");
-      clearDeletedUuid(uuid);
-    } catch (error) {
-      console.warn("Servidor indisponível — exclusão será repetida na próxima sincronização:", error);
-    }
+  const user = getBmUser();
+  if (user && getApiKey()) {
+    el.className = "conn-status is-ok";
+    el.innerHTML = `${icon("check")} Conectado como <strong>${esc(user.realname || user.username)}</strong>${user.email ? ` (${esc(user.email)})` : ""}`;
+  } else if (getApiKey()) {
+    el.className = "conn-status is-info";
+    el.textContent = "Chave salva, conexão ainda não testada.";
   } else {
-    clearDeletedUuid(uuid); // nunca chegou ao servidor
+    el.className = "conn-status";
+    el.textContent = "Nenhuma chave configurada.";
   }
-
-  showToast("Registro excluído!", "success");
-  await loadHistory();
 }
 
-window.deleteHistoryRecord = deleteHistoryRecord;
+function updateConnectionBadge() {
+  const on = !!(getApiKey() && getBmUser());
+  $("#conn-dot").classList.toggle("is-on", on);
+  $("#settings-open").title = on ? `Businessmap: ${getBmUser().realname || getBmUser().username}` : "Configurar conexão com o Businessmap";
+}
 
-/**
- * Apaga TODOS os registros do histórico — no navegador e no servidor.
- * Registros que não puderam ser removidos do servidor ficam marcados como
- * excluídos (lápides) e serão apagados na próxima sincronização.
- */
-async function clearAllHistory() {
-  const total = (state.historyRecords || []).length;
-  const localTotal = getLocalHistory().length;
+function bindSettings() {
+  $("#settings-open").addEventListener("click", openSettings);
 
-  if (total === 0 && localTotal === 0) {
-    showToast("O histórico já está vazio.", "info");
-    return;
-  }
+  $("#api-key-toggle").addEventListener("click", () => {
+    const input = $("#api-key");
+    input.type = input.type === "password" ? "text" : "password";
+  });
 
-  const msg =
-    `Apagar TODO o histórico (${Math.max(total, localTotal)} registro(s))?\n\n` +
-    `Esta ação remove os registros deste navegador e do servidor e NÃO pode ser desfeita.\n` +
-    `Dica: use "⬇️ Backup" antes, se quiser guardar uma cópia.`;
-  if (!confirm(msg)) return;
-
-  // Lápides antes de limpar o local, para que nada "ressuscite" na sincronização
-  for (const rec of state.historyRecords || []) {
-    if (rec.uuid) addDeletedUuid(rec.uuid);
-  }
-
-  const serverIds = (state.historyRecords || [])
-    .map((r) => r.server_id)
-    .filter((id) => id != null);
-
-  clearLocalHistory();
-  state.historyRecords = [];
-  syncAttempted.clear();
-  renderHistoryCards([], true);
-
-  showLoading(true);
-  let serverCleared = false;
-  try {
-    await apiCall("/api/historico", "DELETE");
-    serverCleared = true;
-  } catch (error) {
-    console.warn("Limpeza em lote indisponível, removendo registro por registro:", error);
-    // Fallback: apagar um a um (servidor sem o endpoint de limpeza total)
+  $("#api-key-save").addEventListener("click", async () => {
+    const key = $("#api-key").value.trim();
+    if (!key) return renderConnStatus("Cole a API Key antes de salvar.", "error");
+    clearApiKey();
+    resetConference();
+    setApiKey(key);
+    renderConnStatus("Testando conexão…", "info");
     try {
-      for (const id of serverIds) {
-        await apiCall(`/api/historico/${id}`, "DELETE");
-      }
-      serverCleared = true;
-    } catch (err) {
-      console.warn("Servidor indisponível — exclusões pendentes serão repetidas:", err);
+      await bm.me();
+      renderConnStatus();
+      if (state.view === "conferencia") showConference();
+      toast("Conexão com o Businessmap funcionando.", "success");
+    } catch (e) {
+      renderConnStatus(e.message, "error");
     }
-  } finally {
-    showLoading(false);
-  }
+    updateConnectionBadge();
+  });
 
-  if (serverCleared) {
-    try { localStorage.removeItem(LS_DELETED_KEY); } catch { /* ignore */ }
-    showToast("🗑️ Histórico apagado por completo!", "success");
-  } else {
-    showToast("🗑️ Histórico apagado neste navegador. O servidor será limpo na próxima sincronização.", "success");
-  }
+  $("#api-key-remove").addEventListener("click", () => {
+    clearApiKey();
+    resetConference();
+    $("#api-key").value = "";
+    renderConnStatus();
+    updateConnectionBadge();
+    toast("Chave removida deste navegador.", "info");
+  });
 
-  await loadHistory();
+  $("#pref-journey").addEventListener("change", (e) => {
+    if (parseTime(e.target.value) === null) return;
+    settings.journey = e.target.value;
+    saveSettings();
+    if (state.step === 2) renderDays();
+    if (state.step === 3) renderResult();
+  });
+
+  $("#pref-theme").addEventListener("change", (e) => {
+    settings.theme = e.target.value;
+    applyTheme(settings.theme);
+    saveSettings();
+  });
 }
 
-// ============ Detalhe do Histórico ============
-
-async function viewHistoryDetail(uuid) {
-  const modal = document.getElementById("history-detail-modal");
-  const metaEl = document.getElementById("history-detail-meta");
-  const bodyEl = document.getElementById("history-detail-body");
-
-  // Mostrar loading no modal
-  bodyEl.innerHTML = `<div class="detail-loading"><div class="spinner" style="width:32px;height:32px;border-width:3px"></div><p>Carregando...</p></div>`;
-  modal.style.display = "flex";
-
-  try {
-    const rec = (state.historyRecords || []).find((r) => r.uuid === uuid);
-    let data;
-
-    if (rec?.dias) {
-      // Registro completo disponível no navegador — sem depender do servidor
-      data = rec;
-    } else if (rec?.server_id) {
-      const response = await apiCall(`/api/historico/${rec.server_id}`);
-      data = await response.json();
-    } else {
-      throw new Error("Registro não encontrado");
-    }
-
-    // Metadados
-    metaEl.innerHTML = `
-      <span class="detail-meta-item">👤 <strong>${data.colaborador}</strong></span>
-      <span class="detail-meta-sep">•</span>
-      <span class="detail-meta-item">📅 ${data.periodo_inicio} → ${data.periodo_fim}</span>
-      <span class="detail-meta-sep">•</span>
-      <span class="detail-meta-item">⏱️ <strong>${(data.total_horas || 0).toFixed(2)}h</strong></span>
-    `;
-
-    // Dias com atividades
-    const diasUteis = (data.dias || []).filter(d => !d.is_ignored);
-    const diasIgnorados = (data.dias || []).filter(d => d.is_ignored);
-
-    if (diasUteis.length === 0) {
-      bodyEl.innerHTML = `<p class="detail-empty">Nenhum dia útil registrado neste apontamento.</p>`;
-      return;
-    }
-
-    const diasHtml = diasUteis.map(day => {
-      const intervalsHtml = day.intervals
-        .filter(iv => iv.entry || iv.exit)
-        .map((iv, idx) => {
-          const timeRange = (iv.entry && iv.exit)
-            ? `<span class="detail-interval-time">${iv.entry} → ${iv.exit}</span>`
-            : `<span class="detail-interval-time detail-interval-incomplete">(incompleto)</span>`;
-
-          return `
-            <div class="detail-interval">
-              <div class="detail-interval-header">
-                <span class="detail-interval-badge">Intervalo ${idx + 1}</span>
-                ${timeRange}
-              </div>
-            </div>
-          `;
-        }).join("");
-
-      const totalHorasDay = day.total_hours > 0
-        ? `<span class="detail-day-total">${day.total_hours.toFixed(2)}h (${formatTotalHours(day.total_hours)})</span>`
-        : ``;
-
-      const balanceHtml = (day.overtime && day.overtime !== "00:00") || (day.absence && day.absence !== "00:00") ? `
-        <div class="detail-balance" style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color); font-size: 0.8rem; display: flex; gap: 15px;">
-          <span><strong>Horas Extras:</strong> ${day.overtime || "00:00"}</span>
-          <span><strong>Ausências:</strong> ${day.absence || "00:00"}</span>
-        </div>
-      ` : '';
-
-      const tipoBadge = day.activity_type
-        ? `<span class="detail-tipo-badge tipo-${normalizeTipo(day.activity_type)}">${day.activity_type}</span>`
-        : "";
-
-      return `
-        <div class="detail-day-card">
-          <div class="detail-day-header">
-            <div class="detail-day-info">
-              <strong class="detail-day-date">${day.date}</strong>
-              <span class="detail-day-name">${day.day_name}</span>
-              ${tipoBadge}
-            </div>
-            ${totalHorasDay}
-          </div>
-          <div class="detail-intervals">
-            ${intervalsHtml || `<p class="detail-no-desc">Nenhum intervalo preenchido</p>`}
-          </div>
-          ${balanceHtml}
-        </div>
-      `;
-    }).join("");
-
-    // Dias ignorados resumidos
-    const ignoradosHtml = diasIgnorados.length > 0
-      ? `<details class="detail-ignored-section">
-           <summary>📅 Dias não úteis (${diasIgnorados.length})</summary>
-           <div class="detail-ignored-list">
-             ${diasIgnorados.map(d => `<span class="detail-ignored-badge">${d.date} — ${d.ignore_reason || d.day_name}</span>`).join("")}
-           </div>
-         </details>`
-      : "";
-
-    bodyEl.innerHTML = `
-      <div class="table-legend">
-        <span class="legend-item"><span class="legend-badge">HE</span> Horas Extras</span>
-        <span class="legend-item"><span class="legend-badge">AUS</span> Ausências</span>
-        <span class="legend-item"><span class="legend-badge alert">!</span> Divergência</span>
-      </div>
-      <div class="detail-days-list">${diasHtml}</div>
-      ${ignoradosHtml}
-    `;
-
-  } catch (error) {
-    console.error("Erro ao buscar detalhes:", error);
-    bodyEl.innerHTML = `<p class="detail-empty" style="color: var(--status-divergent)">Erro ao carregar detalhes: ${error.message}</p>`;
-  }
-}
-
-window.viewHistoryDetail = viewHistoryDetail;
-
-// ============ Export ============
-
-async function handleExport() {
-  if (!state.results || !state.results.days.length) { showToast("Nenhum dado para exportar", "error"); return; }
-  showLoading(true);
-  try {
-    const response = await fetch(`${API_BASE}/api/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ days: state.results.days }),
-    });
-    if (!response.ok) throw new Error("Erro ao exportar");
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "apontamento_resultado.xlsx";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-    showToast("Arquivo exportado com sucesso!", "success");
-  } catch (error) {
-    console.error("Erro:", error);
-    showToast("Erro ao exportar arquivo", "error");
-  } finally {
-    showLoading(false);
-  }
-}
-
-// ============ UI Helpers ============
-
-function showLoading(show) {
-  elements.loading.style.display = show ? "flex" : "none";
-}
-
-function showToast(message, type = "info") {
-  elements.toast.textContent = message;
-  elements.toast.className = `toast ${type} show`;
-  setTimeout(() => { elements.toast.classList.remove("show"); }, 3000);
-}
-
-// ============ Float History Button ============
-
-/**
- * Verifica silenciosamente se há registros no histórico.
- * Se sim, exibe o botão flutuante discreto.
- */
-async function checkAndShowFloatBtn() {
-  const floatBtn = document.getElementById("float-history-btn");
-  if (!floatBtn) return;
-
-  // Histórico local aparece na hora, sem esperar o servidor acordar
-  if (getLocalHistory().length > 0) {
-    floatBtn.style.display = "flex";
-    return;
-  }
-
-  try {
-    const response = await apiCall("/api/historico");
-    const data = await response.json();
-    if (data.registros && data.registros.length > 0) {
-      floatBtn.style.display = "flex";
-    }
-  } catch (error) {
-    // Silencioso — sem aviso ao usuário
-    console.warn("Não foi possível verificar histórico na inicialização:", error);
-  }
-}
-
-// ============ Backup / Restauração ============
-
-function exportBackup() {
-  const records = getLocalHistory();
-  if (records.length === 0) {
-    showToast("Nenhum registro local para exportar.", "error");
-    return;
-  }
-
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const filename = `apontamentos_backup_${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.json`;
-
-  const blob = new Blob([JSON.stringify(records, null, 2)], { type: "application/json" });
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  window.URL.revokeObjectURL(url);
-
-  showToast(`⬇️ Backup com ${records.length} registro(s) baixado!`, "success");
-}
-
-function importBackup(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const imported = JSON.parse(e.target.result);
-      if (!Array.isArray(imported)) throw new Error("Formato inválido");
-
-      const existing = getLocalHistory();
-      const existingUuids = new Set(existing.map((r) => r.uuid));
-      let added = 0;
-
-      for (const rec of imported) {
-        if (!rec.uuid || !rec.colaborador || !rec.periodo_inicio) continue;
-        if (existingUuids.has(rec.uuid)) continue;
-        existing.push({ ...rec, synced: false, server_id: null });
-        added++;
-      }
-
-      setLocalHistory(existing);
-      showToast(added > 0
-        ? `⬆️ ${added} registro(s) restaurado(s) com sucesso!`
-        : "Todos os registros do backup já existem.", "success");
-      loadHistory();
-    } catch (error) {
-      console.error("Erro ao importar backup:", error);
-      showToast("Arquivo de backup inválido.", "error");
-    }
-  };
-  reader.readAsText(file);
-}
-
-/**
- * Mantém a aplicação ativa no Render fazendo um ping periódico.
- */
-function setupAntiSleepPing() {
-  const TEN_MINUTES = 10 * 60 * 1000;
-  
-  // Ping imediato e depois a cada 10 minutos
-  const ping = async () => {
-    try {
-      console.log(`[Anti-Sleep] Pingando API em ${new Date().toLocaleTimeString()}...`);
-      await fetch(`${API_BASE}/api/health`).catch(() => {});
-    } catch (error) {
-      console.warn("[Anti-Sleep] Falha no ping:", error);
-    }
-  };
-
-  ping();
-  setInterval(ping, TEN_MINUTES);
-}
+// Disponível para depuração no console.
+window.__apontamento = { state, settings, API_BASE };
