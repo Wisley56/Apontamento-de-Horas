@@ -1,114 +1,35 @@
-# Deploy do Sistema de Apontamento de Horas
-
-## Arquitetura Segura
+# Deploy
 
 ```
-┌─────────────────┐         ┌─────────────────┐
-│   Frontend      │  ───►   │    Backend      │
-│   (Vercel)      │   API   │   (Render)      │
-│                 │         │                 │
-│  Variável de    │         │   FastAPI       │
-│  Ambiente       │         │   Python 3.11   │
-└─────────────────┘         └─────────────────┘
+Navegador ──► Frontend estático (Vercel) ──► Backend FastAPI (Render) ──► API do Businessmap
+              index.html + js/css             /api/*  (proxy, sem banco)
 ```
 
----
+A API Key do Businessmap fica no navegador de cada usuário. O backend não tem banco de dados nem segredos, porque o histórico em SQLite foi removido na v3.
 
-## 1. Deploy do Backend (Render)
+## 1. Backend (Render)
 
-### Passo 1: Criar Web Service no Render
+1. **New + → Web Service**, conectado ao repositório.
+2. Configuração:
+   - **Root Directory:** `backend`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `uvicorn app:app --host 0.0.0.0 --port $PORT`
+3. Variáveis de ambiente (opcionais):
+   - `BUSINESSMAP_BASE_URL`: padrão `https://lugardegente.businessmap.io/api/v2`.
+   - `ALLOWED_ORIGINS`: por exemplo `https://seu-app.vercel.app`. O padrão `*` também funciona, porque o app não usa cookies.
+4. Copie a URL gerada, por exemplo `https://apontamento-de-horas.onrender.com`.
 
-1. Acesse [render.com](https://render.com)
-2. Clique em **"New +"** → **"Web Service"**
-3. Conecte seu repositório GitHub
-4. Configure:
-   - **Name**: `apontamento-de-horas`
-   - **Root Directory**: `backend`
-   - **Environment**: `Python 3`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+## 2. Frontend (Vercel)
 
-5. Clique em **"Create Web Service"**
+1. **Settings → Environment Variables:** `VITE_API_URL` = URL do backend.
+2. **Settings → General → Root Directory:** `frontend`. O `vercel.json` gera o `js/config.js` no build.
+3. Faça um redeploy.
 
-### Passo 2: Copiar a URL
+### Desenvolvimento local
 
-Após o deploy, copie a URL (ex: `https://apontamento-de-horas.onrender.com`)
+Rodando `python app.py` dentro de `backend`, o próprio backend serve o frontend em `http://localhost:8000`. O `js/config.js` (fora do git) detecta o ambiente local automaticamente.
 
----
+## Observações
 
-## 2. Deploy do Frontend (Vercel)
-
-### Passo 1: Configurar Variável de Ambiente no Vercel
-
-1. No painel do projeto Vercel, vá em **Settings** → **Environment Variables**
-2. Adicione:
-   - **Name**: `VITE_API_URL`
-   - **Value**: `https://apontamento-de-horas.onrender.com` (sua URL do Render)
-   - **Environment**: Production, Preview, Development
-
-3. Clique em **Save**
-
-### Passo 2: Configurar Build
-
-1. Em **Settings** → **General**:
-   - **Root Directory**: `frontend`
-   - **Build Command**: deixe o padrão (será usado o vercel.json)
-
-### Passo 3: Redeploy
-
-Após configurar a variável, faça um redeploy para aplicar.
-
----
-
-## 🔒 Segurança
-
-### Arquivo config.js
-
-- **NÃO é commitado** (está no .gitignore)
-- É **gerado automaticamente** pelo Vercel durante o build
-- Usa variável de ambiente `VITE_API_URL`
-
-### Para desenvolvimento local
-
-Crie manualmente o arquivo `frontend/js/config.js`:
-
-```javascript
-window.APP_CONFIG = {
-  API_URL: "http://localhost:8000",
-};
-```
-
----
-
-## ⚠️ Observações Importantes
-
-### Cold Start do Render (Plano Gratuito)
-
-- O backend "adormece" após 15 minutos de inatividade
-- A primeira requisição pode demorar ~30 segundos
-- Isso é normal e gratuito para sempre
-
----
-
-## 📁 Estrutura Final
-
-```
-apontamento-horas/
-├── backend/                # Deploy no Render
-│   ├── app.py
-│   ├── requirements.txt
-│   ├── render.yaml
-│   └── services/
-│
-├── frontend/               # Deploy no Vercel
-│   ├── index.html
-│   ├── vercel.json         # Gera config.js no build
-│   ├── css/style.css
-│   └── js/
-│       ├── app.js
-│       ├── config.js       # ⚠️ Ignorado pelo git
-│       └── config.example.js
-│
-├── .gitignore              # Inclui config.js
-└── README.md
-```
+- **Cold start (Render gratuito):** o backend "dorme" após 15 minutos sem uso, e a primeira requisição pode levar cerca de 30 segundos. O frontend faz um ping a cada 10 minutos enquanto estiver aberto.
+- **Limites do Businessmap:** 30 requisições por minuto e 600 por hora, por usuário. Um lançamento típico usa de 3 a 6 requisições.

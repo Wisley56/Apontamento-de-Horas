@@ -33,3 +33,6 @@ frontend/js/config.js
 
 # Database
 *.db
+
+# Documentation BusinessMap
+docs/businessmap-openapi.json
